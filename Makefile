@@ -16,7 +16,7 @@ AOBJS=		bam_index.o bam_plcmd.o sam_view.o \
 			cut_target.o phase.o bam2depth.o padding.o bedcov.o bamshuf.o \
             faidx.o stats.o bam_flags.o
             # tview todo: bam_tview.o bam_tview_curses.o bam_tview_html.o bam_lpileup.o
-INCLUDES=	-I. -I$(HTSDIR)
+INCLUDES=	-I. -I$(HTSDIR) -I./leveldb/include
 LIBCURSES=	-lcurses # -lXCurses
 
 prefix      = /usr/local
@@ -87,8 +87,19 @@ lib:libbam.a
 libbam.a:$(LOBJS)
 	$(AR) -csru $@ $(LOBJS)
 
-samtools: $(AOBJS) libbam.a $(HTSLIB)
-	$(CC) -pthread $(LDFLAGS) -o $@ $(AOBJS) libbam.a $(HTSLIB) $(LDLIBS) $(LIBCURSES) -lm -lz
+samtools:leveldb/Makefile leveldb/libleveldb.a libbam.a $(HTSLIB) $(AOBJS)
+	$(CC) -pthread $(LDFLAGS) -o $@ $(AOBJS) libbam.a $(HTSLIB) leveldb/libleveldb.a $(LDLIBS) $(LIBCURSES) -lm -lz
+
+leveldb/Makefile:
+	$(MAKE) git-submodule-incantations
+
+git-submodule-incantations:
+	git submodule init
+	git submodule sync
+	git submodule update
+
+leveldb/libleveldb.a:
+	$(MAKE) -C leveldb
 
 bgzip: bgzip.o $(HTSLIB)
 	$(CC) -pthread $(LDFLAGS) -o $@ bgzip.o $(HTSLIB) -lz
@@ -204,4 +215,4 @@ tags:
 force:
 
 
-.PHONY: all check clean distclean force install lib mostlyclean tags test
+.PHONY: all check clean distclean force install lib mostlyclean tags test git-submodule-incantations
