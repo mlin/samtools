@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include "bam.h"
 #include "htslib/ksort.h"
+#include <leveldb/c.h>
 
 static int g_is_by_qname = 0;
 
@@ -525,6 +526,205 @@ int bam_sort_core_ext(int is_by_qname, const char *fn, const char *prefix, const
 	return 0;
 }
 
+/* LevelDB comparator for genome coordinates encoded as uint64_t's (as in
+   bam1_lt above) */
+int coord_leveldb_comparator(void *ctx, const char *a, size_t alen, const char *b, size_t blen) {
+	register uint64_t ai = *((uint64_t*) a);
+	register uint64_t bi = *((uint64_t*) b);
+	if (ai < bi) {
+		return -1;
+	}
+	return (ai == bi) ? 0 : 1;
+}
+const char* coord_leveldb_comparator_name(void *ctx) {
+	return "samtools_coord";
+}
+
+/* No-op LevelDB comparator destructor */
+void nop_leveldb_comparator_destructor(void *c) {
+}
+
+/* Load contents of BAM fp into LevelDB ldb, keyed by leftmost genome position
+   (encoded as a uint64_t) or by qname (if g_is_by_qname) */
+int bam_sort_core_ext_lsm_load(bamFile fp, leveldb_t *ldb) {
+	int ret = 0;
+	bam1_t *b;
+	size_t buflen = 1024;
+	leveldb_writeoptions_t *ldbwropts;
+	char *ldberr = 0;
+	uint64_t coord_key;
+	char *key;
+
+	key = (char*) &coord_key;
+	ldbwropts = leveldb_writeoptions_create();
+	b = (bam1_t*) malloc(sizeof(bam1_t)+buflen);
+	if (!ldbwropts || !b) {
+		return -4;
+	}
+	memset(b, 0, sizeof(bam1_t));
+	
+	/* for each BAM record */
+	while ((ret = bam_read1(fp,b)) >= 0) {
+		/* formulate key for insertion into LevelDB */
+		if (g_is_by_qname) {
+			key = bam1_qname(b);
+		} else {
+			coord_key = ((uint64_t)b->core.tid<<32|(b->core.pos+1)<<1|bam1_strand(b));	
+			/* invariant: !g_is_by_qname => key == (char*) &coord_key */
+		}
+
+		/* Copy b->data into the buffer directly following the bam1_t at b,
+		   so that we can then stick the whole thing into LevelDB. It would
+		   be nice to avoid this copying, but bam_read1 may call realloc on
+		   b->data so unfortunately we can't just put it anywhere we want. */
+		if (buflen < b->l_data) {
+			// expand the buffer
+			buflen = b->l_data;
+			kroundup32(buflen);
+			b = (bam1_t*) realloc(b, sizeof(bam1_t)+buflen);
+			if (!b) {
+				return -4;
+			}
+		}
+		memcpy(b+1, b->data, b->l_data);
+
+		/* insert this key & value into LevelDB */
+		leveldb_put(ldb, ldbwropts,
+			        key, (g_is_by_qname ? (strlen(key)+1) : sizeof(int64_t)),
+			        (char*) b, sizeof(bam1_t) + b->l_data,
+			        &ldberr);
+		if (ldberr) {
+			fprintf(stderr, "[bam_sort_lsm] %s\n", ldberr);
+			/* FIXME cleanup */
+			return -1;
+		}
+	}
+	if (ret != -1)
+		fprintf(stderr, "[bam_sort_lsm] truncated file. Continue anyway.\n");
+	
+	leveldb_writeoptions_destroy(ldbwropts);
+	if (b->data) free(b->data);
+	free(b);
+	return 0;
+}
+
+/* Traverse the LevelDB and output a BAM file */
+int bam_sort_core_ext_lsm_to_bam(leveldb_t *ldb, const bam_header_t *header, const char *fnout, const int n_threads, const int level) {
+	leveldb_readoptions_t *ldbrdopts;
+	leveldb_iterator_t *ldbiter;
+	char *ldberr = 0;
+	bamFile fp;
+	bam1_t *b;
+	size_t vsz = 0;
+
+	ldbrdopts = leveldb_readoptions_create();
+	leveldb_readoptions_set_verify_checksums(ldbrdopts, 0);
+	ldbiter = leveldb_create_iterator(ldb, ldbrdopts);
+	leveldb_readoptions_destroy(ldbrdopts);
+
+	/* FIXME respect level */
+	fp = strcmp(fnout, "-") ? bam_open(fnout, "w1") : bam_dopen(fileno(stdout), "w1");
+	if (fp == 0) return -1;
+	bam_header_write(fp, header);
+	if (n_threads > 1) bgzf_mt(fp, n_threads, 256);
+
+	/* For each record in LevelDB */
+	for (leveldb_iter_seek_to_first(ldbiter); leveldb_iter_valid(ldbiter); leveldb_iter_next(ldbiter)) {
+        /* Extract bam1_t, knowing that the LevelDB value consists of a bam1_t
+		   with a garbage data pointer, immediately followed by the data */
+		b = (bam1_t*) leveldb_iter_value(ldbiter, &vsz);
+		b->data = (uint8_t*)(b+1);
+		b->m_data = vsz - sizeof(bam1_t);
+		/* Write to output BAM */
+		bam_write1(fp, b);
+	}
+
+	leveldb_iter_get_error(ldbiter, &ldberr);
+	if (ldberr) {
+		fprintf(stderr, "[bam_sort_lsm] %s\n", ldberr);
+		/* FIXME cleanup */
+		return -1;
+	}
+
+	bam_close(fp);
+	leveldb_iter_destroy(ldbiter);
+
+	return 0;
+}
+
+/*!
+  @abstract Sort an unsorted BAM file based on the chromosome order
+  and the leftmost position of an alignment
+
+  @param  is_by_qname whether to sort by query name
+  @param  fn       name of the file to be sorted
+  @param  prefix   prefix of the temporary files (prefix.NNNN.bam are written)
+  @param  fnout    name of the final output file to be written
+  @param  max_mem  approxiate maximum memory (very inaccurate)
+  @return 0 for successful sorting, negative on errors
+
+  @discussion It may create multiple temporary subalignment files
+  and then merge them by calling bam_merge_core(). This function is
+  NOT thread safe.
+ */
+int bam_sort_core_ext_lsm(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const size_t _max_mem, const int n_threads, const int level) {
+	int ret = 0;
+	bamFile fp;
+	bam_header_t *header;
+	leveldb_t *ldb;
+	leveldb_options_t *ldbopts;
+	leveldb_comparator_t *ldbcomp;
+	char *ldberr = 0;
+
+	g_is_by_qname = is_by_qname;
+
+	fp = strcmp(fn, "-")? bam_open(fn, "r") : bam_dopen(fileno(stdin), "r");
+	if (fp == 0) {
+		fprintf(stderr, "[bam_sort_lsm] fail to open file %s\n", fn);
+		return -1;
+	}
+	header = bam_header_read(fp);
+	if (g_is_by_qname) change_SO(header, "queryname");
+	else change_SO(header, "coordinate");
+
+	/* Configure & open LevelDB */
+	/* FIXME use qname comparator if appropriate */
+	ldbcomp = leveldb_comparator_create(0, nop_leveldb_comparator_destructor, coord_leveldb_comparator, coord_leveldb_comparator_name);
+	ldbopts = leveldb_options_create();
+	if (!ldbcomp || !ldbopts) {
+		return -4;
+	}
+	leveldb_options_set_create_if_missing(ldbopts, 1);
+	leveldb_options_set_error_if_exists(ldbopts, 1);
+	leveldb_options_set_paranoid_checks(ldbopts, 0);
+	leveldb_options_set_verify_compactions(ldbopts, 0);
+	leveldb_options_set_write_buffer_size(ldbopts, _max_mem/2);
+	leveldb_options_set_block_size(ldbopts, 16777216);
+	leveldb_options_set_comparator(ldbopts, ldbcomp);
+	ldb = leveldb_open(ldbopts, prefix, &ldberr);
+	leveldb_options_destroy(ldbopts);
+	if (!ldb) {
+		fprintf(stderr, "[bam_sort_lsm] %s\n", ldberr ? ldberr : "failed creating LevelDB");
+		/* FIXME cleanup */
+		return -1;
+	}
+
+	/* Load input BAM into LevelDB */
+	ret = bam_sort_core_ext_lsm_load(fp, ldb);
+	bam_close(fp);
+	if (ret != 0) {
+		return ret;
+	}
+
+	/* Export sorted BAM from LevelDB */
+	ret = bam_sort_core_ext_lsm_to_bam(ldb, header, fnout, n_threads, level);
+
+	bam_header_destroy(header);
+	leveldb_close(ldb);
+	leveldb_comparator_destroy(ldbcomp);
+	return ret;
+}
+
 int bam_sort_core(int is_by_qname, const char *fn, const char *prefix, size_t max_mem)
 {
 	int ret;
@@ -576,7 +776,8 @@ int bam_sort(int argc, char *argv[])
 		sprintf(fnout, "%s%s", argv[optind+1], full_path? "" : ".bam");
 	}
 
-	if (bam_sort_core_ext(is_by_qname, argv[optind], argv[optind+1], fnout, max_mem, n_threads, level) < 0) ret = 1;
+	//if (bam_sort_core_ext(is_by_qname, argv[optind], argv[optind+1], fnout, max_mem, n_threads, level) < 0) ret = 1;
+	if (bam_sort_core_ext_lsm(is_by_qname, argv[optind], argv[optind+1], fnout, max_mem, n_threads, level) < 0) ret = 1;
 	free(fnout);
 	return ret;
 }

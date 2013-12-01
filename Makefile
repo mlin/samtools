@@ -88,7 +88,7 @@ libbam.a:$(LOBJS)
 	$(AR) -csru $@ $(LOBJS)
 
 samtools:leveldb/Makefile leveldb/libleveldb.a libbam.a $(HTSLIB) $(AOBJS)
-	$(CC) -pthread $(LDFLAGS) -o $@ $(AOBJS) libbam.a $(HTSLIB) leveldb/libleveldb.a $(LDLIBS) $(LIBCURSES) -lm -lz
+	$(CC) -pthread $(LDFLAGS) -o $@ $(AOBJS) libbam.a $(HTSLIB) leveldb/libleveldb.a $(LDLIBS) $(LIBCURSES) -lm -lz -lstdc++
 
 leveldb/Makefile:
 	$(MAKE) git-submodule-incantations
