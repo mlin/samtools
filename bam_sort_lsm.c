@@ -77,7 +77,26 @@ static int pos_leveldb_comparator(void *ctx, const char *a, size_t alen, const c
 	return (ai == bi) ? 0 : 1;
 }
 static const char* pos_leveldb_comparator_name(void *ctx) {
-	return "samtools_pos";
+	return "samtools_sort_lsm_pos";
+}
+
+/* LevelDB comparator for qnames. The key encoding consists of the null-
+   terminated qname string followed immediately by flag:uint32_t. */
+static int qname_leveldb_comparator(void *ctx, const char *a, size_t alen, const char *b, size_t blen) {
+	register int t;
+	register uint32_t aflag, bflag;
+	if ((t = strnum_cmp(a,b)) != 0) {
+		return t;
+	}
+	aflag = *(uint32_t*)(a + alen - sizeof(uint32_t));
+	bflag = *(uint32_t*)(b + blen - sizeof(uint32_t));
+	if (aflag < bflag) {
+		return -1;
+	}
+	return (aflag == bflag) ? 0 : 1;
+}
+static const char* qname_leveldb_comparator_name(void *ctx) {
+	return "samtools_sort_lsm_qname";
 }
 
 /* No-op LevelDB comparator destructor */
@@ -93,9 +112,10 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname) {
 	leveldb_writeoptions_t *ldbwropts = 0;
 	char *ldberr = 0;
 	uint64_t pos_key;
-	char *key;
+	char *key = 0;
+	size_t keybufsz = 0;
+	size_t keylen;
 
-	key = (char*) &pos_key;
 	ldbwropts = leveldb_writeoptions_create();
 	b = (bam1_t*) malloc(sizeof(bam1_t)+buflen);
 	if (!ldbwropts || !b) {
@@ -103,15 +123,27 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname) {
 		goto cleanup;
 	}
 	memset(b, 0, sizeof(bam1_t));
+
+	if (!is_by_qname) {
+		key = (char*) &pos_key;
+		keylen = sizeof(uint64_t);
+	}
 	
 	/* for each BAM record */
 	while ((ret = bam_read1(fp,b)) >= 0) {
 		/* formulate key for insertion into LevelDB */
 		if (is_by_qname) {
-			key = bam1_qname(b);
+			keylen = b->core.l_qname + sizeof(uint32_t);
+			if (keylen > keybufsz) {
+				keybufsz = b->core.l_qname + sizeof(uint32_t);
+				kroundup32(keybufsz);
+				key = realloc(key, keybufsz);
+			}
+			memcpy(key, bam1_qname(b), b->core.l_qname);
+			*(uint32_t*)(key+b->core.l_qname) = b->core.flag;
 		} else {
 			pos_key = ((uint64_t)b->core.tid<<32|(b->core.pos+1)<<1|bam1_strand(b));	
-			/* invariant: !is_by_qname => key == (char*) &pos_key */
+			/* invariant: !is_by_qname => key == (char*) &pos_key, keylen == sizeof(int64_t) */
 		}
 
 		/* Copy b->data into the buffer directly following the bam1_t at b,
@@ -131,10 +163,7 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname) {
 		memcpy(b+1, b->data, b->l_data);
 
 		/* insert this key & value into LevelDB */
-		leveldb_put(ldb, ldbwropts,
-			        key, (is_by_qname ? (strlen(key)+1) : sizeof(int64_t)),
-			        (char*) b, sizeof(bam1_t) + b->l_data,
-			        &ldberr);
+		leveldb_put(ldb, ldbwropts, key, keylen, (char*) b, sizeof(bam1_t) + b->l_data, &ldberr);
 		if (ldberr) {
 			fprintf(stderr, "[bam_sort_lsm_core] %s\n", ldberr);
 			ret = -1;
@@ -150,6 +179,9 @@ cleanup:
 	if (b) {
 		if (b->data) free(b->data);
 		free(b);
+	}
+	if (keybufsz) {
+		free(key);
 	}
 	if (ldberr) {
 		free(ldberr);
@@ -253,8 +285,11 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	else change_SO(header, "posinate");
 
 	/* Configure & open LevelDB */
-	/* FIXME use qname comparator if appropriate */
-	ldbcomp = leveldb_comparator_create(0, nop_leveldb_comparator_destructor, pos_leveldb_comparator, pos_leveldb_comparator_name);
+	if (is_by_qname) {
+		ldbcomp = leveldb_comparator_create(0, nop_leveldb_comparator_destructor, qname_leveldb_comparator, qname_leveldb_comparator_name);
+	} else {
+		ldbcomp = leveldb_comparator_create(0, nop_leveldb_comparator_destructor, pos_leveldb_comparator, pos_leveldb_comparator_name);
+	}
 	ldbopts = leveldb_options_create();
 	if (!ldbcomp || !ldbopts) {
 		ret = -4;
@@ -274,8 +309,8 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 		goto cleanup;
 	}
 
-	/* Load input BAM into LevelDB */
-	if (ret = bam_to_leveldb(fp, ldb, is_by_qname)) {
+	/* Load input BAM into LevelDB */ 
+	if ((ret = bam_to_leveldb(fp, ldb, is_by_qname)) != 0) {
 		goto cleanup;
 	}
 
@@ -285,9 +320,13 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 cleanup:
 	if(fp) bam_close(fp);
 	if(header) bam_header_destroy(header);
-	if(ldb) leveldb_close(ldb);
+	if(ldb) {
+		leveldb_close(ldb);
+		leveldb_destroy_db(ldbopts, prefix, &ldberr);
+	}
 	if(ldbcomp) leveldb_comparator_destroy(ldbcomp);
 	if(ldbopts) leveldb_options_destroy(ldbopts);
+	if(ldberr) free(ldberr);
 	return ret;
 }
 
