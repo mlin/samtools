@@ -156,6 +156,9 @@ stats.o: stats.c $(sam_h) sam_header.h khash_utils.h samtools.h $(HTSDIR)/htslib
 check test:
 	test/test.pl
 
+test_sort_lsm: samtools
+	test/sort_lsm/test.sh
+
 
 # misc programs
 

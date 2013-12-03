@@ -247,6 +247,31 @@ cleanup:
 	return ret;
 }
 
+/* If TMPDIR environment variable is defined, create a temp directory there.
+   Otherwise create a directory name based on prefix.*/
+char* choose_leveldb_path(const char *prefix) {
+	char *tmpdir = getenv("TMPDIR");
+	char *ans = 0;
+	const char *template_const = "/samtools_sort_lsm_XXXXXX";
+	const char *suffix = ".sort_lsm";
+
+	if (tmpdir && *tmpdir) {
+		ans = malloc(strlen(tmpdir)+strlen(template_const)+1);
+		strcpy(ans, tmpdir);
+		strcat(ans, template_const);
+		if (!mkdtemp(ans)) {
+			free(ans);
+			return NULL;
+		}
+	} else {
+		ans = malloc(strlen(prefix)+strlen(suffix)+1);
+		strcpy(ans, prefix);
+		strcat(ans, suffix);
+	}
+
+	return ans;
+}
+
 /*!
   @abstract Sort an unsorted BAM file based on the chromosome order
   and the leftmost position of an alignment
@@ -270,6 +295,7 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	leveldb_options_t *ldbopts = 0;
 	leveldb_comparator_t *ldbcomp = 0;
 	char *ldberr = 0;
+	char *ldbpath = 0;
 
 	if (!(fp = strcmp(fn, "-")? bam_open(fn, "r") : bam_dopen(fileno(stdin), "r"))) {
 		fprintf(stderr, "[bam_sort_lsm_core] fail to open file %s\n", fn);
@@ -282,7 +308,7 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 		goto cleanup;
 	}
 	if (is_by_qname) change_SO(header, "queryname");
-	else change_SO(header, "posinate");
+	else change_SO(header, "coordinate");
 
 	/* Configure & open LevelDB */
 	if (is_by_qname) {
@@ -303,7 +329,14 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	leveldb_options_set_block_size(ldbopts, 16777216);
 	leveldb_options_set_compression(ldbopts, leveldb_snappy_compression);
 	leveldb_options_set_comparator(ldbopts, ldbcomp);
-	if (!(ldb = leveldb_open(ldbopts, prefix, &ldberr))) {
+
+	ldbpath = choose_leveldb_path(prefix);
+	if (!ldbpath) {
+		fprintf(stderr, "[bam_sort_lsm] Failed creating temporary directory; check given prefix and TMPDIR environment variable.\n");
+		ret = -1;
+		goto cleanup;
+	}
+	if (!(ldb = leveldb_open(ldbopts, ldbpath, &ldberr))) {
 		fprintf(stderr, "[bam_sort_lsm] %s\n", ldberr ? ldberr : "failed creating LevelDB");
 		ret = -4;
 		goto cleanup;
@@ -322,11 +355,12 @@ cleanup:
 	if(header) bam_header_destroy(header);
 	if(ldb) {
 		leveldb_close(ldb);
-		leveldb_destroy_db(ldbopts, prefix, &ldberr);
+		leveldb_destroy_db(ldbopts, ldbpath, &ldberr);
 	}
 	if(ldbcomp) leveldb_comparator_destroy(ldbcomp);
 	if(ldbopts) leveldb_options_destroy(ldbopts);
 	if(ldberr) free(ldberr);
+	if(ldbpath) free(ldbpath);
 	return ret;
 }
 

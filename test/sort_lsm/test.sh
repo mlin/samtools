@@ -16,6 +16,7 @@ fi
 if [ -z "$TEST_BAM" ]; then
 	TEST_BAM="${TMPDIR}/samtools_sort_lsm_test.bam"
 	if ! [ -f "$TEST_BAM" ]; then
+		echo "Fetching a test BAM file (25MB) from the internet..."
 		wget -O "$TEST_BAM" "https://test.galaxyproject.org/library_common/download_dataset_from_folder?library_id=04c38ea196069a5d&cntrller=library&use_panels=False&id=4a29c5f588caf7fb"
 	fi
 fi
