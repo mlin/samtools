@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include "bam.h"
 #include <leveldb/c.h>
+#include <inttypes.h>
 
 static int strnum_cmp(const char *_a, const char *_b)
 {
@@ -138,7 +139,7 @@ static void nop_leveldb_comparator_destructor(void *c) {
 
 /* Load contents of BAM fp into LevelDB ldb, keyed by leftmost genome position
    (encoded as a uint64_t) or by qname (if is_by_qname) */
-static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, unsigned long long *count) {
+static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, uint64_t *count) {
 	int ret = 0;
 	bam1_t *b = 0;
 	size_t buflen = 1024;
@@ -241,7 +242,7 @@ cleanup:
 }
 
 /* Traverse the LevelDB and output a BAM file */
-static int leveldb_to_bam(leveldb_t *ldb, const bam_header_t *header, const char *fnout, const int n_threads, const int level, unsigned long long *count) {
+static int leveldb_to_bam(leveldb_t *ldb, const bam_header_t *header, const char *fnout, const int n_threads, const int level, uint64_t *count) {
 	int ret = 0;
 	leveldb_readoptions_t *ldbrdopts = 0;
 	leveldb_iterator_t *ldbiter = 0;
@@ -350,7 +351,7 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	leveldb_comparator_t *ldbcomp = 0;
 	char *ldberr = 0;
 	char *ldbpath = 0;
-	unsigned long long count1 = 0, count2 = 0;
+	uint64_t count1 = 0, count2 = 0;
 
 	if (!(fp = strcmp(fn, "-")? bam_open(fn, "r") : bam_dopen(fileno(stdin), "r"))) {
 		fprintf(stderr, "[bam_sort_lsm_core] fail to open file %s\n", fn);
@@ -404,13 +405,13 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	}
 
 	/* Export sorted BAM from LevelDB */
-	fprintf(stderr, "[bam_sort_lsm_core] Sorted %llu records. Writing out %s...\n", count1, fnout);
+	fprintf(stderr, "[bam_sort_lsm_core] Sorted %" PRIu64 " records. Writing out %s...\n", count1, fnout);
 	if ((ret = leveldb_to_bam(ldb, header, fnout, n_threads, level, &count2)) != 0) {
 		goto cleanup;
 	}
 
 	if (count1 != count2) {
-		fprintf(stderr, "[bam_sort_lsm_core] BUG: read %llu, wrote %llu records!\n", count1, count2);
+		fprintf(stderr, "[bam_sort_lsm_core] BUG: read %" PRIu64 ", wrote % " PRIu64 " records!\n", count1, count2);
 		ret = -1;
 		goto cleanup;
 	}
