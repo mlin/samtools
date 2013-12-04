@@ -73,11 +73,11 @@ static int compare_sequence_numbers(const char *seqnoa, size_t alen, const char 
 	uint64_t ai = 0, bi = 0;
 	for(; alen; alen--) {
 		ai <<= 8;
-		ai |= (uint8_t) *(seqnoa++);
+		ai |= (uint8_t) *(seqnoa+alen-1);
 	}
 	for(; blen; blen--) {
 		bi <<= 8;
-		bi |= (uint8_t) *(seqnob++);
+		bi |= (uint8_t) *(seqnob+blen-1);
 	}
 	if (ai < bi) {
 		return -1;
@@ -392,6 +392,7 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 		ret = -1;
 		goto cleanup;
 	}
+	fprintf(stderr, "[bam_sort_lsm_core] Sorting in %s (you can change this with the TMPDIR environment variable)...\n", ldbpath);
 	if (!(ldb = leveldb_open(ldbopts, ldbpath, &ldberr))) {
 		fprintf(stderr, "[bam_sort_lsm] %s\n", ldberr ? ldberr : "failed creating LevelDB");
 		ret = -4;
@@ -399,7 +400,6 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	}
 
 	/* Load input BAM into LevelDB */ 
-	fprintf(stderr, "[bam_sort_lsm_core] Sorting in %s (you can change this with the TMPDIR environment variable)...\n", ldbpath);
 	if ((ret = bam_to_leveldb(fp, ldb, is_by_qname, &count1)) != 0) {
 		goto cleanup;
 	}
