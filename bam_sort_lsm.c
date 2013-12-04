@@ -66,6 +66,28 @@ static int change_SO(bam_header_t *h, const char *so)
 	return 0;
 }
 
+/* compare function for variable-length, little-endian sequence numbers
+   we append to LevelDB key names to ensure uniqueness and sort stability */
+static int compare_sequence_numbers(const char *seqnoa, size_t alen, const char *seqnob, size_t blen) {
+	uint64_t ai = 0, bi = 0;
+	for(; alen; alen--) {
+		ai <<= 8;
+		ai |= (uint8_t) *(seqnoa++);
+	}
+	for(; blen; blen--) {
+		bi <<= 8;
+		bi |= (uint8_t) *(seqnob++);
+	}
+	if (ai < bi) {
+		return -1;
+	} else if (ai > bi) {
+		return 1;
+	} else {
+		/* shouldn't happen - the sequence numbers are unique... */
+		return 0;
+	}
+}
+
 /* LevelDB comparator for genome positions encoded as uint64_t's (as in
    bam1_lt in bam_sort.c) */
 static int pos_leveldb_comparator(void *ctx, const char *a, size_t alen, const char *b, size_t blen) {
@@ -73,8 +95,12 @@ static int pos_leveldb_comparator(void *ctx, const char *a, size_t alen, const c
 	register uint64_t bi = *((uint64_t*) b);
 	if (ai < bi) {
 		return -1;
+	} else if (ai > bi) {
+		return 1;
 	}
-	return (ai == bi) ? 0 : 1;
+	/* rarely - break tie with sequence numbers */
+	return compare_sequence_numbers(a+sizeof(uint64_t),alen-sizeof(uint64_t),
+		                            b+sizeof(uint64_t),blen-sizeof(uint64_t));
 }
 static const char* pos_leveldb_comparator_name(void *ctx) {
 	return "samtools_sort_lsm_pos";
@@ -84,16 +110,23 @@ static const char* pos_leveldb_comparator_name(void *ctx) {
    terminated qname string followed immediately by flag:uint32_t. */
 static int qname_leveldb_comparator(void *ctx, const char *a, size_t alen, const char *b, size_t blen) {
 	register int t;
-	register uint32_t aflag, bflag;
+	uint32_t aflag, bflag;
+	size_t qnamealen, qnameblen;
 	if ((t = strnum_cmp(a,b)) != 0) {
 		return t;
 	}
-	aflag = *(uint32_t*)(a + alen - sizeof(uint32_t));
-	bflag = *(uint32_t*)(b + blen - sizeof(uint32_t));
+	qnamealen = strlen(a);
+	qnameblen = strlen(b);
+	aflag = *(uint32_t*)(a + qnamealen + 1);
+	bflag = *(uint32_t*)(b + qnameblen + 1);
 	if (aflag < bflag) {
 		return -1;
+	} else if (aflag > bflag) {
+		return 1;
 	}
-	return (aflag == bflag) ? 0 : 1;
+	/* rarely - break tie with sequence numbers */
+	return compare_sequence_numbers(a+qnamealen+1+sizeof(uint32_t), alen-qnamealen-1-sizeof(uint32_t),
+		                            b+qnameblen+1+sizeof(uint32_t), blen-qnameblen-1-sizeof(uint32_t));
 }
 static const char* qname_leveldb_comparator_name(void *ctx) {
 	return "samtools_sort_lsm_qname";
@@ -111,10 +144,17 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, uns
 	size_t buflen = 1024;
 	leveldb_writeoptions_t *ldbwropts = 0;
 	char *ldberr = 0;
-	uint64_t pos_key;
 	char *key = 0;
 	size_t keybufsz = 0;
-	size_t keylen;
+	size_t keylen = 0;
+	uint64_t seqno;
+
+	key = calloc(2, sizeof(uint64_t));
+	if (!key) {
+		ret = -4;
+		goto cleanup;
+	}
+	keybufsz = 2*sizeof(uint64_t);
 
 	*count=0;
 
@@ -125,27 +165,36 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, uns
 		goto cleanup;
 	}
 	memset(b, 0, sizeof(bam1_t));
-
-	if (!is_by_qname) {
-		key = (char*) &pos_key;
-		keylen = sizeof(uint64_t);
-	}
 	
 	/* for each BAM record */
 	while ((ret = bam_read1(fp,b)) >= 0) {
 		/* formulate key for insertion into LevelDB */
 		if (is_by_qname) {
+			/* null-terminated qname followed by flags byte */
 			keylen = b->core.l_qname + sizeof(uint32_t);
-			if (keylen > keybufsz) {
-				keybufsz = b->core.l_qname + sizeof(uint32_t);
+			if (keylen+sizeof(uint64_t) > keybufsz) {
+				keybufsz = keylen+sizeof(uint64_t);
 				kroundup32(keybufsz);
 				key = realloc(key, keybufsz);
+				if (!key) {
+					ret = -4;
+					goto cleanup;
+				}
 			}
 			memcpy(key, bam1_qname(b), b->core.l_qname);
 			*(uint32_t*)(key+b->core.l_qname) = b->core.flag;
 		} else {
-			pos_key = ((uint64_t)b->core.tid<<32|(b->core.pos+1)<<1|bam1_strand(b));	
-			/* invariant: !is_by_qname => key == (char*) &pos_key, keylen == sizeof(int64_t) */
+			/* uint64_t encoded genome position (tid,pos,strand) */
+			*(uint64_t*)key = ((uint64_t)b->core.tid<<32|(b->core.pos+1)<<1|bam1_strand(b));
+			keylen = sizeof(uint64_t);
+		}
+		/* append the variable-length, little-endian sequence number to the key,
+		   ensuring uniqueness & sort stability */
+		seqno = ++(*count);
+		while (seqno > 0) {
+			*(uint8_t*)(key+keylen) = (uint8_t) (seqno & 0xFF);
+			seqno >>= 8;
+			keylen++;
 		}
 
 		/* Copy b->data into the buffer directly following the bam1_t at b,
@@ -171,8 +220,6 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, uns
 			ret = -1;
 			goto cleanup;
 		}
-
-		++(*count);
 	}
 	if (ret != -1)
 		fprintf(stderr, "[bam_sort_lsm_core] truncated file. Continue anyway.\n");
@@ -368,7 +415,7 @@ int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 		goto cleanup;
 	}
 
-	fprintf(stderr, "[bam_sort_lsm_core] OK\n", fnout);
+	fprintf(stderr, "[bam_sort_lsm_core] OK\n");
 
 cleanup:
 	if(fp) bam_close(fp);

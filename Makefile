@@ -87,6 +87,10 @@ lib:libbam.a
 libbam.a:$(LOBJS)
 	$(AR) -csru $@ $(LOBJS)
 
+# FIXME: we need -lsnappy only if libsnappy-dev is installed; if not, the
+# LevelDB build script compiles and statically links its own copy. So we could
+# remove the dependency on libsnappy-dev (and -lsnappy) if we could similarly
+# detect when LevelDB doesn't need it.
 samtools:leveldb/Makefile leveldb/libleveldb.a libbam.a $(HTSLIB) $(AOBJS)
 	$(CC) -pthread $(LDFLAGS) -o $@ $(AOBJS) libbam.a $(HTSLIB) leveldb/libleveldb.a $(LDLIBS) $(LIBCURSES) -lm -lz -lstdc++ -lsnappy
 
