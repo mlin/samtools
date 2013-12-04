@@ -9,6 +9,7 @@
 #include <leveldb/c.h>
 #include <inttypes.h>
 
+/* strnum_cmp and change_SO taken from bam_sort.c */
 static int strnum_cmp(const char *_a, const char *_b)
 {
 	const unsigned char *a = (const unsigned char*)_a, *b = (const unsigned char*)_b;
@@ -99,7 +100,7 @@ static int pos_leveldb_comparator(void *ctx, const char *a, size_t alen, const c
 	} else if (ai > bi) {
 		return 1;
 	}
-	/* rarely - break tie with sequence numbers */
+	/* rarely - break tie with appended sequence numbers */
 	return compare_sequence_numbers(a+sizeof(uint64_t),alen-sizeof(uint64_t),
 		                            b+sizeof(uint64_t),blen-sizeof(uint64_t));
 }
@@ -111,21 +112,25 @@ static const char* pos_leveldb_comparator_name(void *ctx) {
    terminated qname string followed immediately by flag:uint32_t. */
 static int qname_leveldb_comparator(void *ctx, const char *a, size_t alen, const char *b, size_t blen) {
 	register int t;
-	uint32_t aflag, bflag;
 	size_t qnamealen, qnameblen;
+	uint32_t aflag, bflag;
 	if ((t = strnum_cmp(a,b)) != 0) {
 		return t;
 	}
+	/* break qname tie with flags (see bam1_lt in bam_sort.c) which are
+	   in a uint32_t following the qname null terminator */
 	qnamealen = strlen(a);
 	qnameblen = strlen(b);
 	aflag = *(uint32_t*)(a + qnamealen + 1);
+	aflag &= 0xc0;
 	bflag = *(uint32_t*)(b + qnameblen + 1);
+	bflag &= 0xc0;
 	if (aflag < bflag) {
 		return -1;
 	} else if (aflag > bflag) {
 		return 1;
 	}
-	/* rarely - break tie with sequence numbers */
+	/* rarely - break further tie with appended sequence numbers */
 	return compare_sequence_numbers(a+qnamealen+1+sizeof(uint32_t), alen-qnamealen-1-sizeof(uint32_t),
 		                            b+qnameblen+1+sizeof(uint32_t), blen-qnameblen-1-sizeof(uint32_t));
 }
@@ -171,7 +176,7 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, uin
 	while ((ret = bam_read1(fp,b)) >= 0) {
 		/* formulate key for insertion into LevelDB */
 		if (is_by_qname) {
-			/* null-terminated qname followed by flags byte */
+			/* null-terminated qname followed by flags uint32_t */
 			keylen = b->core.l_qname + sizeof(uint32_t);
 			if (keylen+sizeof(uint64_t) > keybufsz) {
 				keybufsz = keylen+sizeof(uint64_t);
@@ -192,10 +197,10 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, uin
 		/* append the variable-length, little-endian sequence number to the key,
 		   ensuring uniqueness & sort stability */
 		seqno = ++(*count);
-		while (seqno > 0) {
+		while (seqno) {
 			*(uint8_t*)(key+keylen) = (uint8_t) (seqno & 0xFF);
-			seqno >>= 8;
 			keylen++;
+			seqno >>= 8;
 		}
 
 		/* Copy b->data into the buffer directly following the bam1_t at b,
@@ -332,15 +337,15 @@ char* choose_leveldb_path(const char *prefix) {
   and the leftmost position of an alignment
 
   @param  is_by_qname whether to sort by query name
-  @param  fn       name of the file to be sorted
-  @param  prefix   prefix of the temporary files (prefix.NNNN.bam are written)
-  @param  fnout    name of the final output file to be written
-  @param  max_mem  approxiate maximum memory (very inaccurate)
+  @param  fn        name of the file to be sorted
+  @param  prefix    prefix of the temporary directory (used if TMPDIR is not defined)
+  @param  fnout     name of the final output file to be written
+  @param  max_mem   approxiate maximum memory (very inaccurate)
+  @param  n_threads number of threads to use for BGZF compression of output BAM
+  @param  level     BGZF compression level for output BAM
   @return 0 for successful sorting, negative on errors
 
-  @discussion It may create multiple temporary subalignment files
-  and then merge them by calling bam_merge_core(). This function is
-  NOT thread safe.
+  @discussion This function is NOT thread safe.
  */
 int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const size_t _max_mem, const int n_threads, const int level) {
 	int ret = 0;
