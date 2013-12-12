@@ -14,7 +14,7 @@ fi
 
 # Fetch a test BAM file
 if [ -z "$TEST_BAM" ]; then
-	TEST_BAM="${TMPDIR}/samtools_sort_lsm_test.bam"
+	TEST_BAM="${TMPDIR}/samtools_rocksort_test.bam"
 	if ! [ -f "$TEST_BAM" ]; then
 		echo "Fetching a test BAM file (25MB) from the internet..."
 		wget -O "$TEST_BAM" "https://test.galaxyproject.org/library_common/download_dataset_from_folder?library_id=04c38ea196069a5d&cntrller=library&use_panels=False&id=4a29c5f588caf7fb"
@@ -22,12 +22,12 @@ if [ -z "$TEST_BAM" ]; then
 fi
 
 # Shuffle it
-testdir=$(mktemp -d --tmpdir samtools_sort_lsm_test.XXXXXX)
+testdir=$(mktemp -d --tmpdir samtools_rocksort_test.XXXXXX)
 echo "Temporary test directory: $testdir"
 cd "$testdir"
-shuffled_bam="${testdir}/samtools_sort_lsm_test_shuffled.bam"
+shuffled_bam="${testdir}/samtools_rocksort_test_shuffled.bam"
 echo "Shuffling $TEST_BAM..."
-$samtools bamshuf $TEST_BAM "${testdir}/samtools_sort_lsm_test_shuffled"
+$samtools bamshuf $TEST_BAM "${testdir}/samtools_rocksort_test_shuffled"
 
 # Compile and test bamsorted.c (FIXME ugly)
 cc -o bamsorted -O2 ${srcdir}/bamsorted.c -I"$htslibdir" -I"$samtoolsdir" "$htslibdir/libhts.a" "$samtoolsdir/libbam.a" "$htslibdir/faidx.o" -lz -lpthread
@@ -41,9 +41,9 @@ if [ "$code" -eq "0" ]; then
 	exit 1
 fi
 
-echo "Running samtools sort_lsm..."
-time $samtools sort_lsm -l 1 -@ 2 -m 16M "$shuffled_bam" "${testdir}/samtools_sort_lsm_test_sorted"
-sorted_bam="${testdir}/samtools_sort_lsm_test_sorted.bam"
+echo "Running samtools rocksort..."
+time $samtools rocksort -l 1 -@ 2 -m 16M "$shuffled_bam" "${testdir}/samtools_rocksort_test_sorted"
+sorted_bam="${testdir}/samtools_rocksort_test_sorted.bam"
 
 echo -n "Verifying product: "
 ./bamsorted "$sorted_bam"

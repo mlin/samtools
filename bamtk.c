@@ -111,7 +111,7 @@ int main(int argc, char *argv[])
 	else if (strcmp(argv[1], "mpileup") == 0)   ret = bam_mpileup(argc-1, argv+1);
 	else if (strcmp(argv[1], "merge") == 0)     ret = bam_merge(argc-1, argv+1);
 	else if (strcmp(argv[1], "sort") == 0)      ret = bam_sort(argc-1, argv+1);
-	else if (strcmp(argv[1], "sort_lsm") == 0)  ret = bam_sort_lsm(argc-1, argv+1);
+	else if (strcmp(argv[1], "rocksort") == 0)  ret = bam_rocksort(argc-1, argv+1);
 	else if (strcmp(argv[1], "index") == 0)     ret = bam_index(argc-1, argv+1);
 	else if (strcmp(argv[1], "idxstats") == 0)  ret = bam_idxstats(argc-1, argv+1);
 	else if (strcmp(argv[1], "faidx") == 0)     ret = faidx_main(argc-1, argv+1);

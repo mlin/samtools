@@ -6,7 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "bam.h"
-#include <leveldb/c.h>
+#include <rocksdb/c.h>
 
 static int strnum_cmp(const char *_a, const char *_b)
 {
@@ -67,7 +67,7 @@ static int change_SO(bam_header_t *h, const char *so)
 }
 
 /* compare function for variable-length, little-endian sequence numbers
-   we append to LevelDB key names to ensure uniqueness and sort stability */
+   we append to RocksDB key names to ensure uniqueness and sort stability */
 static int compare_sequence_numbers(const char *seqnoa, size_t alen, const char *seqnob, size_t blen) {
 	uint64_t ai = 0, bi = 0;
 	for(; alen; alen--) {
@@ -88,9 +88,9 @@ static int compare_sequence_numbers(const char *seqnoa, size_t alen, const char 
 	}
 }
 
-/* LevelDB comparator for genome positions encoded as uint64_t's (as in
+/* RocksDB comparator for genome positions encoded as uint64_t's (as in
    bam1_lt in bam_sort.c) */
-static int pos_leveldb_comparator(void *ctx, const char *a, size_t alen, const char *b, size_t blen) {
+static int pos_rocksdb_comparator(void *ctx, const char *a, size_t alen, const char *b, size_t blen) {
 	register uint64_t ai = *((uint64_t*) a);
 	register uint64_t bi = *((uint64_t*) b);
 	if (ai < bi) {
@@ -102,13 +102,13 @@ static int pos_leveldb_comparator(void *ctx, const char *a, size_t alen, const c
 	return compare_sequence_numbers(a+sizeof(uint64_t),alen-sizeof(uint64_t),
 		                            b+sizeof(uint64_t),blen-sizeof(uint64_t));
 }
-static const char* pos_leveldb_comparator_name(void *ctx) {
-	return "samtools_sort_lsm_pos";
+static const char* pos_rocksdb_comparator_name(void *ctx) {
+	return "samtools_rocksort_pos";
 }
 
-/* LevelDB comparator for qnames. The key encoding consists of the null-
+/* RocksDB comparator for qnames. The key encoding consists of the null-
    terminated qname string followed immediately by flag:uint32_t. */
-static int qname_leveldb_comparator(void *ctx, const char *a, size_t alen, const char *b, size_t blen) {
+static int qname_rocksdb_comparator(void *ctx, const char *a, size_t alen, const char *b, size_t blen) {
 	register int t;
 	uint32_t aflag, bflag;
 	size_t qnamealen, qnameblen;
@@ -128,22 +128,22 @@ static int qname_leveldb_comparator(void *ctx, const char *a, size_t alen, const
 	return compare_sequence_numbers(a+qnamealen+1+sizeof(uint32_t), alen-qnamealen-1-sizeof(uint32_t),
 		                            b+qnameblen+1+sizeof(uint32_t), blen-qnameblen-1-sizeof(uint32_t));
 }
-static const char* qname_leveldb_comparator_name(void *ctx) {
-	return "samtools_sort_lsm_qname";
+static const char* qname_rocksdb_comparator_name(void *ctx) {
+	return "samtools_rocksort_qname";
 }
 
-/* No-op LevelDB comparator destructor */
-static void nop_leveldb_comparator_destructor(void *c) {
+/* No-op RocksDB comparator destructor */
+static void nop_rocksdb_comparator_destructor(void *c) {
 }
 
-/* Load contents of BAM fp into LevelDB ldb, keyed by leftmost genome position
+/* Load contents of BAM fp into RocksDB rdb, keyed by leftmost genome position
    (encoded as a uint64_t) or by qname (if is_by_qname) */
-static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, unsigned long long *count) {
+static int bam_to_rocksdb(bamFile fp, rocksdb_t *rdb, const int is_by_qname, unsigned long long *count) {
 	int ret = 0;
 	bam1_t *b = 0;
 	size_t buflen = 1024;
-	leveldb_writeoptions_t *ldbwropts = 0;
-	char *ldberr = 0;
+	rocksdb_writeoptions_t *rdbwropts = 0;
+	char *rdberr = 0;
 	char *key = 0;
 	size_t keybufsz = 0;
 	size_t keylen = 0;
@@ -158,9 +158,9 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, uns
 
 	*count=0;
 
-	ldbwropts = leveldb_writeoptions_create();
+	rdbwropts = rocksdb_writeoptions_create();
 	b = (bam1_t*) malloc(sizeof(bam1_t)+buflen);
-	if (!ldbwropts || !b) {
+	if (!rdbwropts || !b) {
 		ret = -4;
 		goto cleanup;
 	}
@@ -168,7 +168,7 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, uns
 	
 	/* for each BAM record */
 	while ((ret = bam_read1(fp,b)) >= 0) {
-		/* formulate key for insertion into LevelDB */
+		/* formulate key for insertion into RocksDB */
 		if (is_by_qname) {
 			/* null-terminated qname followed by flags byte */
 			keylen = b->core.l_qname + sizeof(uint32_t);
@@ -198,7 +198,7 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, uns
 		}
 
 		/* Copy b->data into the buffer directly following the bam1_t at b,
-		   so that we can then stick the whole thing into LevelDB. It would
+		   so that we can then stick the whole thing into RocksDB. It would
 		   be nice to avoid this copying, but bam_read1 may call realloc on
 		   b->data so unfortunately we can't just put it anywhere we want. */
 		if (buflen < b->l_data) {
@@ -213,20 +213,20 @@ static int bam_to_leveldb(bamFile fp, leveldb_t *ldb, const int is_by_qname, uns
 		}
 		memcpy(b+1, b->data, b->l_data);
 
-		/* insert this key & value into LevelDB */
-		leveldb_put(ldb, ldbwropts, key, keylen, (char*) b, sizeof(bam1_t) + b->l_data, &ldberr);
-		if (ldberr) {
-			fprintf(stderr, "[bam_sort_lsm_core] %s\n", ldberr);
+		/* insert this key & value into RocksDB */
+		rocksdb_put(rdb, rdbwropts, key, keylen, (char*) b, sizeof(bam1_t) + b->l_data, &rdberr);
+		if (rdberr) {
+			fprintf(stderr, "[bam_rocksort_core] %s\n", rdberr);
 			ret = -1;
 			goto cleanup;
 		}
 	}
 	if (ret != -1)
-		fprintf(stderr, "[bam_sort_lsm_core] truncated file. Continue anyway.\n");
+		fprintf(stderr, "[bam_rocksort_core] truncated file. Continue anyway.\n");
 	ret = 0;
 
 cleanup:
-	if (ldbwropts) leveldb_writeoptions_destroy(ldbwropts);
+	if (rdbwropts) rocksdb_writeoptions_destroy(rdbwropts);
 	if (b) {
 		if (b->data) free(b->data);
 		free(b);
@@ -234,18 +234,18 @@ cleanup:
 	if (keybufsz) {
 		free(key);
 	}
-	if (ldberr) {
-		free(ldberr);
+	if (rdberr) {
+		free(rdberr);
 	}
 	return ret;
 }
 
-/* Traverse the LevelDB and output a BAM file */
-static int leveldb_to_bam(leveldb_t *ldb, const bam_header_t *header, const char *fnout, const int n_threads, const int level, unsigned long long *count) {
+/* Traverse the RocksDB and output a BAM file */
+static int rocksdb_to_bam(rocksdb_t *rdb, const bam_header_t *header, const char *fnout, const int n_threads, const int level, unsigned long long *count) {
 	int ret = 0;
-	leveldb_readoptions_t *ldbrdopts = 0;
-	leveldb_iterator_t *ldbiter = 0;
-	char *ldberr = 0;
+	rocksdb_readoptions_t *rdbrdopts = 0;
+	rocksdb_iterator_t *rdbiter = 0;
+	char *rdberr = 0;
 	bamFile fp = 0;
 	bam1_t *b;
 	size_t vsz = 0;
@@ -253,12 +253,12 @@ static int leveldb_to_bam(leveldb_t *ldb, const bam_header_t *header, const char
 
 	*count = 0;
 
-	if (!(ldbrdopts = leveldb_readoptions_create())) {
+	if (!(rdbrdopts = rocksdb_readoptions_create())) {
 		ret = -4;
 		goto cleanup;
 	}
-	leveldb_readoptions_set_verify_checksums(ldbrdopts, 0);
-	if (!(ldbiter = leveldb_create_iterator(ldb, ldbrdopts))) {
+	rocksdb_readoptions_set_verify_checksums(rdbrdopts, 0);
+	if (!(rdbiter = rocksdb_create_iterator(rdb, rdbrdopts))) {
 		ret = -4;
 		goto cleanup;
 	}
@@ -266,18 +266,18 @@ static int leveldb_to_bam(leveldb_t *ldb, const bam_header_t *header, const char
 	strcpy(mode, "w");
 	if (level >= 0) sprintf(mode + 1, "%d", level < 9? level : 9);
 	if (!(fp = strcmp(fnout, "-") ? bam_open(fnout, mode) : bam_dopen(fileno(stdout), mode))) {
-		fprintf(stderr, "[bam_sort_lsm_core] fail to create the output file %s\n",fnout);
+		fprintf(stderr, "[bam_rocksort_core] fail to create the output file %s\n",fnout);
 		ret = -1;
 		goto cleanup;
 	}
 	bam_header_write(fp, header);
 	if (n_threads > 1) bgzf_mt(fp, n_threads, 256);
 
-	/* For each record in LevelDB */
-	for (leveldb_iter_seek_to_first(ldbiter); leveldb_iter_valid(ldbiter); leveldb_iter_next(ldbiter)) {
-        /* Extract bam1_t, knowing that the LevelDB value consists of a bam1_t
+	/* For each record in RocksDB */
+	for (rocksdb_iter_seek_to_first(rdbiter); rocksdb_iter_valid(rdbiter); rocksdb_iter_next(rdbiter)) {
+        /* Extract bam1_t, knowing that the RocksDB value consists of a bam1_t
 		   with a garbage data pointer, immediately followed by the data */
-		b = (bam1_t*) leveldb_iter_value(ldbiter, &vsz);
+		b = (bam1_t*) rocksdb_iter_value(rdbiter, &vsz);
 		b->data = (uint8_t*)(b+1);
 		b->m_data = vsz - sizeof(bam1_t);
 		/* Write to output BAM */
@@ -285,29 +285,29 @@ static int leveldb_to_bam(leveldb_t *ldb, const bam_header_t *header, const char
 		(*count)++;
 	}
 
-	leveldb_iter_get_error(ldbiter, &ldberr);
-	if (ldberr) {
-		fprintf(stderr, "[bam_sort_lsm_core] %s\n", ldberr);
+	rocksdb_iter_get_error(rdbiter, &rdberr);
+	if (rdberr) {
+		fprintf(stderr, "[bam_rocksort_core] %s\n", rdberr);
 		ret = -1;
 		goto cleanup;
 	}
 
 cleanup:
 	if (fp) bam_close(fp);
-	if (ldbiter) leveldb_iter_destroy(ldbiter);
-	if (ldberr) free(ldberr);
-	if (ldbrdopts) leveldb_readoptions_destroy(ldbrdopts);
+	if (rdbiter) rocksdb_iter_destroy(rdbiter);
+	if (rdberr) free(rdberr);
+	if (rdbrdopts) rocksdb_readoptions_destroy(rdbrdopts);
 
 	return ret;
 }
 
 /* If TMPDIR environment variable is defined, create a temp directory there.
    Otherwise create a directory name based on prefix.*/
-char* choose_leveldb_path(const char *prefix) {
+char* choose_rocksdb_path(const char *prefix) {
 	char *tmpdir = getenv("TMPDIR");
 	char *ans = 0;
-	const char *template_const = "/samtools_sort_lsm_XXXXXX";
-	const char *suffix = ".sort_lsm";
+	const char *template_const = "/samtools_rocksort_XXXXXX";
+	const char *suffix = ".rocksort";
 
 	if (tmpdir && *tmpdir) {
 		ans = malloc(strlen(tmpdir)+strlen(template_const)+1);
@@ -341,111 +341,111 @@ char* choose_leveldb_path(const char *prefix) {
   and then merge them by calling bam_merge_core(). This function is
   NOT thread safe.
  */
-int bam_sort_lsm_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const size_t _max_mem, const int n_threads, const int level) {
+int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const size_t _max_mem, const int n_threads, const int level) {
 	int ret = 0;
 	bamFile fp = 0;
 	bam_header_t *header = 0;
-	leveldb_t *ldb = 0;
-	leveldb_options_t *ldbopts = 0;
-	leveldb_comparator_t *ldbcomp = 0;
-	char *ldberr = 0;
-	char *ldbpath = 0;
+	rocksdb_t *rdb = 0;
+	rocksdb_options_t *rdbopts = 0;
+	rocksdb_comparator_t *rdbcomp = 0;
+	char *rdberr = 0;
+	char *rdbpath = 0;
 	unsigned long long count1 = 0, count2 = 0;
 
 	if (!(fp = strcmp(fn, "-")? bam_open(fn, "r") : bam_dopen(fileno(stdin), "r"))) {
-		fprintf(stderr, "[bam_sort_lsm_core] fail to open file %s\n", fn);
+		fprintf(stderr, "[bam_rocksort_core] fail to open file %s\n", fn);
 		ret = -1;
 		goto cleanup;
 	}
 	if (!(header = bam_header_read(fp))) {
-		fprintf(stderr, "[bam_sort_lsm_core] fail to parse file %s\n", fn);
+		fprintf(stderr, "[bam_rocksort_core] fail to parse file %s\n", fn);
 		ret = -1;
 		goto cleanup;
 	}
 	if (is_by_qname) change_SO(header, "queryname");
 	else change_SO(header, "coordinate");
 
-	/* Configure & open LevelDB */
+	/* Configure & open RocksDB */
 	if (is_by_qname) {
-		ldbcomp = leveldb_comparator_create(0, nop_leveldb_comparator_destructor, qname_leveldb_comparator, qname_leveldb_comparator_name);
+		rdbcomp = rocksdb_comparator_create(0, nop_rocksdb_comparator_destructor, qname_rocksdb_comparator, qname_rocksdb_comparator_name);
 	} else {
-		ldbcomp = leveldb_comparator_create(0, nop_leveldb_comparator_destructor, pos_leveldb_comparator, pos_leveldb_comparator_name);
+		rdbcomp = rocksdb_comparator_create(0, nop_rocksdb_comparator_destructor, pos_rocksdb_comparator, pos_rocksdb_comparator_name);
 	}
-	ldbopts = leveldb_options_create();
-	if (!ldbcomp || !ldbopts) {
+	rdbopts = rocksdb_options_create();
+	if (!rdbcomp || !rdbopts) {
 		ret = -4;
 		goto cleanup;
 	}
-	leveldb_options_set_create_if_missing(ldbopts, 1);
-	leveldb_options_set_error_if_exists(ldbopts, 1);
-	leveldb_options_set_paranoid_checks(ldbopts, 0);
-	leveldb_options_set_verify_compactions(ldbopts, 0);
-	leveldb_options_set_write_buffer_size(ldbopts, _max_mem/2);
-	leveldb_options_set_block_size(ldbopts, 16777216);
-	leveldb_options_set_compression(ldbopts, leveldb_snappy_compression);
-	leveldb_options_set_comparator(ldbopts, ldbcomp);
+	rocksdb_options_set_create_if_missing(rdbopts, 1);
+	rocksdb_options_set_error_if_exists(rdbopts, 1);
+	rocksdb_options_set_paranoid_checks(rdbopts, 0);
+	/* rocksdb_options_set_verify_compactions(rdbopts, 0); */
+	rocksdb_options_set_write_buffer_size(rdbopts, _max_mem/2);
+	rocksdb_options_set_block_size(rdbopts, 16777216);
+	rocksdb_options_set_compression(rdbopts, rocksdb_snappy_compression);
+	rocksdb_options_set_comparator(rdbopts, rdbcomp);
 
-	ldbpath = choose_leveldb_path(prefix);
-	if (!ldbpath) {
-		fprintf(stderr, "[bam_sort_lsm] Failed creating temporary directory; check given prefix and TMPDIR environment variable.\n");
+	rdbpath = choose_rocksdb_path(prefix);
+	if (!rdbpath) {
+		fprintf(stderr, "[bam_rocksort] Failed creating temporary directory; check given prefix and TMPDIR environment variable.\n");
 		ret = -1;
 		goto cleanup;
 	}
-	if (!(ldb = leveldb_open(ldbopts, ldbpath, &ldberr))) {
-		fprintf(stderr, "[bam_sort_lsm] %s\n", ldberr ? ldberr : "failed creating LevelDB");
+	if (!(rdb = rocksdb_open(rdbopts, rdbpath, &rdberr))) {
+		fprintf(stderr, "[bam_rocksort] %s\n", rdberr ? rdberr : "failed creating RocksDB");
 		ret = -4;
 		goto cleanup;
 	}
 
-	/* Load input BAM into LevelDB */ 
-	fprintf(stderr, "[bam_sort_lsm_core] Sorting in %s (you can change this with the TMPDIR environment variable)...\n", ldbpath);
-	if ((ret = bam_to_leveldb(fp, ldb, is_by_qname, &count1)) != 0) {
+	/* Load input BAM into RocksDB */ 
+	fprintf(stderr, "[bam_rocksort_core] Sorting in %s (you can change this with the TMPDIR environment variable)...\n", rdbpath);
+	if ((ret = bam_to_rocksdb(fp, rdb, is_by_qname, &count1)) != 0) {
 		goto cleanup;
 	}
 
-	/* Export sorted BAM from LevelDB */
-	fprintf(stderr, "[bam_sort_lsm_core] Sorted %llu records. Writing out %s...\n", count1, fnout);
-	if ((ret = leveldb_to_bam(ldb, header, fnout, n_threads, level, &count2)) != 0) {
+	/* Export sorted BAM from RocksDB */
+	fprintf(stderr, "[bam_rocksort_core] Sorted %llu records. Writing out %s...\n", count1, fnout);
+	if ((ret = rocksdb_to_bam(rdb, header, fnout, n_threads, level, &count2)) != 0) {
 		goto cleanup;
 	}
 
 	if (count1 != count2) {
-		fprintf(stderr, "[bam_sort_lsm_core] BUG: read %llu, wrote %llu records!\n", count1, count2);
+		fprintf(stderr, "[bam_rocksort_core] BUG: read %llu, wrote %llu records!\n", count1, count2);
 		ret = -1;
 		goto cleanup;
 	}
 
-	fprintf(stderr, "[bam_sort_lsm_core] OK\n");
+	fprintf(stderr, "[bam_rocksort_core] OK\n");
 
 cleanup:
 	if(fp) bam_close(fp);
 	if(header) bam_header_destroy(header);
-	if(ldb) {
-		leveldb_close(ldb);
-		leveldb_destroy_db(ldbopts, ldbpath, &ldberr);
+	if(rdb) {
+		rocksdb_close(rdb);
+		rocksdb_destroy_db(rdbopts, rdbpath, &rdberr);
 	}
-	if(ldbcomp) leveldb_comparator_destroy(ldbcomp);
-	if(ldbopts) leveldb_options_destroy(ldbopts);
-	if(ldberr) free(ldberr);
-	if(ldbpath) free(ldbpath);
+	if(rdbcomp) rocksdb_comparator_destroy(rdbcomp);
+	if(rdbopts) rocksdb_options_destroy(rdbopts);
+	if(rdberr) free(rdberr);
+	if(rdbpath) free(rdbpath);
 
 	if (ret != 0) {
-		fprintf(stderr, "[bam_sort_lsm_core] Exit status %d\n", ret);
+		fprintf(stderr, "[bam_rocksort_core] Exit status %d\n", ret);
 	}
 	return ret;
 }
 
-int bam_sort_lsm_core(int is_by_qname, const char *fn, const char *prefix, size_t max_mem)
+int bam_rocksort_core(int is_by_qname, const char *fn, const char *prefix, size_t max_mem)
 {
 	int ret;
 	char *fnout = calloc(strlen(prefix) + 4 + 1, 1);
 	sprintf(fnout, "%s.bam", prefix);
-	ret = bam_sort_lsm_core_ext(is_by_qname, fn, prefix, fnout, max_mem, 0, -1);
+	ret = bam_rocksort_core_ext(is_by_qname, fn, prefix, fnout, max_mem, 0, -1);
 	free(fnout);
 	return ret;
 }
 
-int bam_sort_lsm(int argc, char *argv[])
+int bam_rocksort(int argc, char *argv[])
 {
 	size_t max_mem = 768<<20; // 512MB
 	int c, is_by_qname = 0, is_stdout = 0, ret = 0, n_threads = 0, level = -1, full_path = 0;
@@ -469,7 +469,7 @@ int bam_sort_lsm(int argc, char *argv[])
 	}
 	if (optind + 2 > argc) {
 		fprintf(stderr, "\n");
-		fprintf(stderr, "Usage:   samtools sort [options] <in.bam> <out.prefix>\n\n");
+		fprintf(stderr, "Usage:   samtools rocksort [options] <in.bam> <out.prefix>\n\n");
 		fprintf(stderr, "Options: -n        sort by read name\n");
 		fprintf(stderr, "         -f        use <out.prefix> as full file name instead of prefix\n");
 		fprintf(stderr, "         -o        final output to stdout\n");
@@ -486,7 +486,7 @@ int bam_sort_lsm(int argc, char *argv[])
 		sprintf(fnout, "%s%s", argv[optind+1], full_path? "" : ".bam");
 	}
 
-	if (bam_sort_lsm_core_ext(is_by_qname, argv[optind], argv[optind+1], fnout, max_mem, n_threads, level) < 0) ret = 1;
+	if (bam_rocksort_core_ext(is_by_qname, argv[optind], argv[optind+1], fnout, max_mem, n_threads, level) < 0) ret = 1;
 	free(fnout);
 	return ret;
 }
