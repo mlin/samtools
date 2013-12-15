@@ -353,6 +353,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	rocksdb_options_t *rdbopts = 0;
 	rocksdb_comparator_t *rdbcomp = 0;
 	rocksdb_universal_compaction_options_t *rdbucopts = 0;
+	rocksdb_cache_t *rdbcache = 0;
 	char *rdberr = 0;
 	char *rdbpath = 0;
 	unsigned long long count1 = 0, count2 = 0;
@@ -379,7 +380,8 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	rdbenv = rocksdb_create_default_env();
 	rdbucopts = rocksdb_universal_compaction_options_create();
 	rdbopts = rocksdb_options_create();
-	if (!rdbcomp || !rdbopts || !rdbenv || !rdbucopts) {
+	rdbcache = rocksdb_cache_create_lru(_max_mem);
+	if (!rdbcomp || !rdbopts || !rdbenv || !rdbucopts || !rdbcache) {
 		ret = -4;
 		goto cleanup;
 	}
@@ -390,6 +392,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	rocksdb_options_set_comparator(rdbopts, rdbcomp);
 	rocksdb_options_set_num_levels(rdbopts, 1);
 	rocksdb_options_set_compression(rdbopts, rocksdb_snappy_compression);
+	rocksdb_options_set_cache(rdbopts, rdbcache);
 	/* concurrency */
 	rocksdb_options_set_max_background_compactions(rdbopts, n_threads);
 	rocksdb_env_set_background_threads(rdbenv, n_threads);
@@ -456,7 +459,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 		goto cleanup;
 	}
 
-	/* TODO: reopen DB in read-only mode, with _max_mem LRU cache */
+	/* TODO? reopen DB in read-only mode */
 
 	/* Export sorted BAM from RocksDB */
 	fprintf(stderr, "[bam_rocksort_core] Writing %llu records to %s...\n", count1, fnout);
@@ -483,6 +486,7 @@ cleanup:
 	if(rdbopts) rocksdb_options_destroy(rdbopts);
 	if(rdbenv) rocksdb_env_destroy(rdbenv);
 	if(rdbucopts) rocksdb_universal_compaction_options_destroy(rdbucopts);
+	if(rdbcache) rocksdb_cache_destroy(rdbcache);
 	if(rdberr) free(rdberr);
 	if(rdbpath) free(rdbpath);
 
