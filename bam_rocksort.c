@@ -164,6 +164,9 @@ static int bam_to_rocksdb(bamFile fp, rocksdb_t *rdb, const int is_by_qname, uns
 		ret = -4;
 		goto cleanup;
 	}
+	/* disable RocksDB write-ahead log since durability (to power loss, etc.)
+	   is unnecessary in this context */
+	rocksdb_writeoptions_disable_WAL(rdbwropts, 1);
 	memset(b, 0, sizeof(bam1_t));
 	
 	/* for each BAM record */
@@ -341,13 +344,15 @@ char* choose_rocksdb_path(const char *prefix) {
   and then merge them by calling bam_merge_core(). This function is
   NOT thread safe.
  */
-int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const size_t _max_mem, const int n_threads, const int level) {
+int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const size_t _max_mem, const int n_threads, const int level, const int keep_db) {
 	int ret = 0;
 	bamFile fp = 0;
 	bam_header_t *header = 0;
+	rocksdb_env_t *rdbenv = 0;
 	rocksdb_t *rdb = 0;
 	rocksdb_options_t *rdbopts = 0;
 	rocksdb_comparator_t *rdbcomp = 0;
+	rocksdb_universal_compaction_options_t *rdbucopts = 0;
 	char *rdberr = 0;
 	char *rdbpath = 0;
 	unsigned long long count1 = 0, count2 = 0;
@@ -371,19 +376,67 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	} else {
 		rdbcomp = rocksdb_comparator_create(0, nop_rocksdb_comparator_destructor, pos_rocksdb_comparator, pos_rocksdb_comparator_name);
 	}
+	rdbenv = rocksdb_create_default_env();
+	rdbucopts = rocksdb_universal_compaction_options_create();
 	rdbopts = rocksdb_options_create();
-	if (!rdbcomp || !rdbopts) {
+	if (!rdbcomp || !rdbopts || !rdbenv || !rdbucopts) {
 		ret = -4;
 		goto cleanup;
 	}
+
+	/* ROCKSDB CONFIGURATION: ESSENTIALS */
 	rocksdb_options_set_create_if_missing(rdbopts, 1);
 	rocksdb_options_set_error_if_exists(rdbopts, 1);
-	rocksdb_options_set_paranoid_checks(rdbopts, 0);
-	/* rocksdb_options_set_verify_compactions(rdbopts, 0); */
-	rocksdb_options_set_write_buffer_size(rdbopts, _max_mem/2);
-	rocksdb_options_set_block_size(rdbopts, 16777216);
-	rocksdb_options_set_compression(rdbopts, rocksdb_snappy_compression);
 	rocksdb_options_set_comparator(rdbopts, rdbcomp);
+	rocksdb_options_set_num_levels(rdbopts, 1);
+	rocksdb_options_set_compression(rdbopts, rocksdb_snappy_compression);
+	/* concurrency */
+	rocksdb_options_set_max_background_compactions(rdbopts, n_threads);
+	rocksdb_env_set_background_threads(rdbenv, n_threads);
+	rocksdb_options_set_env(rdbopts, rdbenv);
+	/* turn off some durability and throttling features (unnecessary here) */
+	rocksdb_options_set_disable_data_sync(rdbopts, 1);
+	rocksdb_options_set_paranoid_checks(rdbopts, 0);
+	rocksdb_options_set_disable_seek_compaction(rdbopts, 1);
+	rocksdb_options_set_level0_slowdown_writes_trigger(rdbopts, 1<<30);
+	rocksdb_options_set_level0_stop_writes_trigger(rdbopts, 1<<30);
+
+	/* TUNE IN-MEMORY COMPACTION */
+
+	/* make the 'open' write buffer at most only 16MB, since insertions
+	   into this buffer are on the unparallelized critical path */
+	rocksdb_options_set_write_buffer_size(rdbopts, 16<<20);
+	/* keep as many of these buffers in memory as we're permitted to */
+	int max_write_buffer_number = _max_mem * n_threads / (16<<20);
+	if (max_write_buffer_number < 16) max_write_buffer_number = 16;
+	rocksdb_options_set_max_write_buffer_number(rdbopts, max_write_buffer_number);
+	/* background-flush the buffers to disk in batches of at least 1/4 the
+	   total number in memory, with a 1MB compression block size */
+	rocksdb_options_set_min_write_buffer_number_to_merge(rdbopts, max_write_buffer_number / 4);
+	rocksdb_options_set_block_size(rdbopts, 1<<20);
+
+	/* TUNE ON-DISK COMPACTION  */
+
+	/* use 'universal' compaction which has lower write amplification and
+	   higher read amplification than level compaction - this is the right
+	   tradeoff given that we're ultimately just going to do one sequential
+	   scan over the DB and then delete it. */
+	rocksdb_options_set_compaction_style(rdbopts, rocksdb_universal_compaction);
+	/* background merge each group of 8 files. this uses background cpu and
+	   disk bandwidth to reduce the merging work that has to be done in the
+	   unparallelized critical path of writing out the final BAM file */
+	rocksdb_options_set_level0_file_num_compaction_trigger(rdbopts, 8);
+	rocksdb_universal_compaction_options_set_min_merge_width(rdbucopts, 8);
+	rocksdb_universal_compaction_options_set_max_merge_width(rdbucopts, 8);
+	rocksdb_universal_compaction_options_set_max_size_amplification_percent(rdbucopts, 1<<30);
+	rocksdb_options_set_universal_compaction_options(rdbopts, rdbucopts);
+
+	/* useless:
+	rocksdb_options_set_memtable_vector_rep(rdbopts);
+	rocksdb_options_set_target_file_size_base(rdbopts, 4*16777216);
+	rocksdb_options_set_source_compaction_factor(rdbopts, 10);
+	rocksdb_universal_compaction_options_set_stop_style(rdbucopts, rocksdb_similar_size_compaction_stop_style);
+	*/
 
 	rdbpath = choose_rocksdb_path(prefix);
 	if (!rdbpath) {
@@ -398,13 +451,15 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	}
 
 	/* Load input BAM into RocksDB */ 
-	fprintf(stderr, "[bam_rocksort_core] Sorting in %s (you can change this with the TMPDIR environment variable)...\n", rdbpath);
+	fprintf(stderr, "[bam_rocksort_core] Loading in %s (you can change this with the TMPDIR environment variable)...\n", rdbpath);
 	if ((ret = bam_to_rocksdb(fp, rdb, is_by_qname, &count1)) != 0) {
 		goto cleanup;
 	}
 
+	/* TODO: reopen DB in read-only mode, with _max_mem LRU cache */
+
 	/* Export sorted BAM from RocksDB */
-	fprintf(stderr, "[bam_rocksort_core] Sorted %llu records. Writing out %s...\n", count1, fnout);
+	fprintf(stderr, "[bam_rocksort_core] Writing %llu records to %s...\n", count1, fnout);
 	if ((ret = rocksdb_to_bam(rdb, header, fnout, n_threads, level, &count2)) != 0) {
 		goto cleanup;
 	}
@@ -422,10 +477,12 @@ cleanup:
 	if(header) bam_header_destroy(header);
 	if(rdb) {
 		rocksdb_close(rdb);
-		rocksdb_destroy_db(rdbopts, rdbpath, &rdberr);
+		if (!keep_db) rocksdb_destroy_db(rdbopts, rdbpath, &rdberr);
 	}
 	if(rdbcomp) rocksdb_comparator_destroy(rdbcomp);
 	if(rdbopts) rocksdb_options_destroy(rdbopts);
+	if(rdbenv) rocksdb_env_destroy(rdbenv);
+	if(rdbucopts) rocksdb_universal_compaction_options_destroy(rdbucopts);
 	if(rdberr) free(rdberr);
 	if(rdbpath) free(rdbpath);
 
@@ -440,7 +497,7 @@ int bam_rocksort_core(int is_by_qname, const char *fn, const char *prefix, size_
 	int ret;
 	char *fnout = calloc(strlen(prefix) + 4 + 1, 1);
 	sprintf(fnout, "%s.bam", prefix);
-	ret = bam_rocksort_core_ext(is_by_qname, fn, prefix, fnout, max_mem, 0, -1);
+	ret = bam_rocksort_core_ext(is_by_qname, fn, prefix, fnout, max_mem, 0, -1, 0);
 	free(fnout);
 	return ret;
 }
@@ -448,13 +505,15 @@ int bam_rocksort_core(int is_by_qname, const char *fn, const char *prefix, size_
 int bam_rocksort(int argc, char *argv[])
 {
 	size_t max_mem = 768<<20; // 512MB
-	int c, is_by_qname = 0, is_stdout = 0, ret = 0, n_threads = 0, level = -1, full_path = 0;
+	int c, is_by_qname = 0, is_stdout = 0, ret = 0,
+	    n_threads = 0, level = -1, full_path = 0, keep_db = 0;
 	char *fnout;
-	while ((c = getopt(argc, argv, "fnom:@:l:")) >= 0) {
+	while ((c = getopt(argc, argv, "fnokm:@:l:")) >= 0) {
 		switch (c) {
 		case 'f': full_path = 1; break;
 		case 'o': is_stdout = 1; break;
 		case 'n': is_by_qname = 1; break;
+		case 'k': keep_db=1; break;
 		case 'm': {
 				char *q;
 				max_mem = strtol(optarg, &q, 0);
@@ -473,6 +532,7 @@ int bam_rocksort(int argc, char *argv[])
 		fprintf(stderr, "Options: -n        sort by read name\n");
 		fprintf(stderr, "         -f        use <out.prefix> as full file name instead of prefix\n");
 		fprintf(stderr, "         -o        final output to stdout\n");
+		fprintf(stderr, "         -k        keep RocksDB instead of deleting it when done\n");
 		fprintf(stderr, "         -l INT    compression level, from 0 to 9 [-1]\n");
 		fprintf(stderr, "         -@ INT    number of sorting and compression threads [1]\n");
 		fprintf(stderr, "         -m INT    max memory per thread; suffix K/M/G recognized [768M]\n");
@@ -486,7 +546,7 @@ int bam_rocksort(int argc, char *argv[])
 		sprintf(fnout, "%s%s", argv[optind+1], full_path? "" : ".bam");
 	}
 
-	if (bam_rocksort_core_ext(is_by_qname, argv[optind], argv[optind+1], fnout, max_mem, n_threads, level) < 0) ret = 1;
+	if (bam_rocksort_core_ext(is_by_qname, argv[optind], argv[optind+1], fnout, max_mem, n_threads, level, keep_db) < 0) ret = 1;
 	free(fnout);
 	return ret;
 }

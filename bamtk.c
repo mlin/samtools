@@ -11,7 +11,7 @@ int bam_mpileup(int argc, char *argv[]);
 int bam_merge(int argc, char *argv[]);
 int bam_index(int argc, char *argv[]);
 int bam_sort(int argc, char *argv[]);
-int bam_sort_lsm(int argc, char *argv[]);
+int bam_rocksort(int argc, char *argv[]);
 int bam_tview_main(int argc, char *argv[]);
 int bam_mating(int argc, char *argv[]);
 int bam_rmdup(int argc, char *argv[]);
