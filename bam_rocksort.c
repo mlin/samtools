@@ -358,11 +358,11 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	char *rdbpath = 0;
 	unsigned long long count1 = 0, count2 = 0;
 
-	/* Heuristic downward adjustment of max_mem to make memory usage closer
-	   to that of 'samtools sort' with the same parameters */
 	size_t max_mem = max_mem_per_thread * n_threads;
-	if (n_threads > 1) max_mem -= 1<<29;
-	if (max_mem < (256<<20)) max_mem = 256<<20;
+	if (max_mem < (512<<20)) max_mem = 512<<20;
+	/* Heuristic downward adjustment of max_mem to make memory requirements
+	   more similar to 'samtools sort' with the same parameters */
+	max_mem -= (size_t)((1<<30) * (max_mem <= ((4<<30)+(512<<20)) ? (max_mem-(512<<20)) / ((float)(4<<30)) : 1.0));
 
 	if (!(fp = strcmp(fn, "-")? bam_open(fn, "r") : bam_dopen(fileno(stdin), "r"))) {
 		fprintf(stderr, "[bam_rocksort_core] fail to open file %s\n", fn);
