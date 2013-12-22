@@ -344,7 +344,7 @@ char* choose_rocksdb_path(const char *prefix) {
   and then merge them by calling bam_merge_core(). This function is
   NOT thread safe.
  */
-int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const size_t _max_mem, const int n_threads, const int level, const int keep_db) {
+int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const size_t max_mem_per_thread, const int n_threads, const int level, const int keep_db) {
 	int ret = 0;
 	bamFile fp = 0;
 	bam_header_t *header = 0;
@@ -357,6 +357,12 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	char *rdberr = 0;
 	char *rdbpath = 0;
 	unsigned long long count1 = 0, count2 = 0;
+
+	/* Heuristic downward adjustment of max_mem to make memory usage closer
+	   to that of 'samtools sort' with the same parameters */
+	size_t max_mem = max_mem_per_thread * n_threads;
+	if (n_threads > 1) max_mem -= 1<<29;
+	if (max_mem < (256<<20)) max_mem = 256<<20;
 
 	if (!(fp = strcmp(fn, "-")? bam_open(fn, "r") : bam_dopen(fileno(stdin), "r"))) {
 		fprintf(stderr, "[bam_rocksort_core] fail to open file %s\n", fn);
@@ -380,7 +386,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	rdbenv = rocksdb_create_default_env();
 	rdbucopts = rocksdb_universal_compaction_options_create();
 	rdbopts = rocksdb_options_create();
-	rdbcache = rocksdb_cache_create_lru(_max_mem);
+	rdbcache = rocksdb_cache_create_lru(256<<20);
 	if (!rdbcomp || !rdbopts || !rdbenv || !rdbucopts || !rdbcache) {
 		ret = -4;
 		goto cleanup;
@@ -411,7 +417,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	   into this buffer are on the unparallelized critical path */
 	rocksdb_options_set_write_buffer_size(rdbopts, 16<<20);
 	/* keep as many of these buffers in memory as possible */
-	int max_write_buffer_number = _max_mem * n_threads / (16<<20);
+	int max_write_buffer_number = max_mem / (16<<20);
 	if (max_write_buffer_number < 16) max_write_buffer_number = 16;
 	rocksdb_options_set_max_write_buffer_number(rdbopts, max_write_buffer_number);
 	/* background-flush the buffers to disk in batches of at least 1/3 the
@@ -497,12 +503,12 @@ cleanup:
 	return ret;
 }
 
-int bam_rocksort_core(int is_by_qname, const char *fn, const char *prefix, size_t max_mem)
+int bam_rocksort_core(int is_by_qname, const char *fn, const char *prefix, size_t max_mem_per_thread)
 {
 	int ret;
 	char *fnout = calloc(strlen(prefix) + 4 + 1, 1);
 	sprintf(fnout, "%s.bam", prefix);
-	ret = bam_rocksort_core_ext(is_by_qname, fn, prefix, fnout, max_mem, 0, -1, 0);
+	ret = bam_rocksort_core_ext(is_by_qname, fn, prefix, fnout, max_mem_per_thread, 0, -1, 0);
 	free(fnout);
 	return ret;
 }
