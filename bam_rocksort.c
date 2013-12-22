@@ -461,7 +461,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	}
 
 	/* Load input BAM into RocksDB */ 
-	fprintf(stderr, "[bam_rocksort_core] Loading in %s (you can change this with the TMPDIR environment variable)...\n", rdbpath);
+	fprintf(stderr, "[bam_rocksort_core] Sorting in %s/ (you can change this with the TMPDIR environment variable)...\n", rdbpath);
 	if ((ret = bam_to_rocksdb(fp, rdb, is_by_qname, &count1)) != 0) {
 		goto cleanup;
 	}
