@@ -393,6 +393,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	rocksdb_options_set_num_levels(rdbopts, 1);
 	rocksdb_options_set_compression(rdbopts, rocksdb_snappy_compression);
 	rocksdb_options_set_cache(rdbopts, rdbcache);
+	rocksdb_options_set_max_open_files(rdbopts, 256);
 	/* concurrency */
 	rocksdb_options_set_max_background_compactions(rdbopts, n_threads);
 	rocksdb_env_set_background_threads(rdbenv, n_threads);
@@ -409,13 +410,13 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	/* make the 'open' write buffer at most only 16MB, since insertions
 	   into this buffer are on the unparallelized critical path */
 	rocksdb_options_set_write_buffer_size(rdbopts, 16<<20);
-	/* keep as many of these buffers in memory as we're permitted to */
+	/* keep as many of these buffers in memory as possible */
 	int max_write_buffer_number = _max_mem * n_threads / (16<<20);
 	if (max_write_buffer_number < 16) max_write_buffer_number = 16;
 	rocksdb_options_set_max_write_buffer_number(rdbopts, max_write_buffer_number);
-	/* background-flush the buffers to disk in batches of at least 1/4 the
+	/* background-flush the buffers to disk in batches of at least 1/3 the
 	   total number in memory, with a 1MB compression block size */
-	rocksdb_options_set_min_write_buffer_number_to_merge(rdbopts, max_write_buffer_number / 4);
+	rocksdb_options_set_min_write_buffer_number_to_merge(rdbopts, max_write_buffer_number / 3);
 	rocksdb_options_set_block_size(rdbopts, 1<<20);
 
 	/* TUNE ON-DISK COMPACTION  */
@@ -425,12 +426,12 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	   tradeoff given that we're ultimately just going to do one sequential
 	   scan over the DB and then delete it. */
 	rocksdb_options_set_compaction_style(rdbopts, rocksdb_universal_compaction);
-	/* background merge each group of 8 files. this uses background cpu and
+	/* background merge each group of 16 files. this uses background cpu and
 	   disk bandwidth to reduce the merging work that has to be done in the
 	   unparallelized critical path of writing out the final BAM file */
-	rocksdb_options_set_level0_file_num_compaction_trigger(rdbopts, 8);
-	rocksdb_universal_compaction_options_set_min_merge_width(rdbucopts, 8);
-	rocksdb_universal_compaction_options_set_max_merge_width(rdbucopts, 8);
+	rocksdb_options_set_level0_file_num_compaction_trigger(rdbopts, 16);
+	rocksdb_universal_compaction_options_set_min_merge_width(rdbucopts, 16);
+	rocksdb_universal_compaction_options_set_max_merge_width(rdbucopts, 16);
 	rocksdb_universal_compaction_options_set_max_size_amplification_percent(rdbucopts, 1<<30);
 	rocksdb_options_set_universal_compaction_options(rdbopts, rdbucopts);
 
@@ -459,7 +460,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 		goto cleanup;
 	}
 
-	/* TODO? reopen DB in read-only mode */
+	/* TODO: halt or wait for any ongoing background compactions */
 
 	/* Export sorted BAM from RocksDB */
 	fprintf(stderr, "[bam_rocksort_core] Writing %llu records to %s...\n", count1, fnout);
