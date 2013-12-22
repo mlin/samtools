@@ -88,7 +88,7 @@ libbam.a:$(LOBJS)
 	$(AR) -csru $@ $(LOBJS)
 
 samtools:rocksdb/Makefile rocksdb/librocksdb.a libbam.a $(HTSLIB) $(AOBJS)
-	$(CC) -pthread $(LDFLAGS) -o $@ $(AOBJS) libbam.a $(HTSLIB) rocksdb/librocksdb.a $(LDLIBS) $(LIBCURSES) -lstdc++ -ltcmalloc -lm -lz -lrt -lsnappy -lbz2
+	$(CC) -pthread $(LDFLAGS) -o $@ $(AOBJS) libbam.a $(HTSLIB) rocksdb/librocksdb.a $(LDLIBS) $(LIBCURSES) -lstdc++ -ljemalloc -lm -lz -lrt -lsnappy -lbz2
 
 rocksdb/Makefile:
 	$(MAKE) git-submodule-incantations
