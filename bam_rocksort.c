@@ -364,7 +364,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	if (max_mem < (512<<20)) max_mem = 512<<20;
 	/* Heuristic downward adjustment of max_mem to make memory requirements
 	   more similar to 'samtools sort' with the same parameters */
-	max_mem -= (size_t)((1<<30) * (max_mem <= ((4<<30)+(512<<20)) ? (max_mem-(512<<20)) / ((float)(4<<30)) : 1.0));
+	max_mem -= (size_t)((1<<29) * (max_mem <= ((4<<30)+(512<<20)) ? (max_mem-(512<<20)) / ((float)(4<<30)) : 1.0));
 
 	if (!(fp = strcmp(fn, "-")? bam_open(fn, "r") : bam_dopen(fileno(stdin), "r"))) {
 		fprintf(stderr, "[bam_rocksort_core] fail to open file %s\n", fn);
