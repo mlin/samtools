@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 #include "bam.h"
 #include <rocksdb/c.h>
 
@@ -344,7 +345,7 @@ char* choose_rocksdb_path(const char *prefix) {
   and then merge them by calling bam_merge_core(). This function is
   NOT thread safe.
  */
-int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const size_t max_mem_per_thread, const int n_threads, const int level, const int keep_db) {
+int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, const size_t max_mem_per_thread, const size_t data_size_hint, const int n_threads, const int level, const int keep_db) {
 	int ret = 0;
 	bamFile fp = 0;
 	bam_header_t *header = 0;
@@ -357,6 +358,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	char *rdberr = 0;
 	char *rdbpath = 0;
 	unsigned long long count1 = 0, count2 = 0;
+	unsigned int max_write_buffer_number = 0, bytes_per_file = 0, files_per_compaction = 0;
 
 	size_t max_mem = max_mem_per_thread * n_threads;
 	if (max_mem < (512<<20)) max_mem = 512<<20;
@@ -417,12 +419,16 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	   into this buffer are on the unparallelized critical path */
 	rocksdb_options_set_write_buffer_size(rdbopts, 16<<20);
 	/* keep as many of these buffers in memory as possible */
-	int max_write_buffer_number = max_mem / (16<<20);
+	max_write_buffer_number = max_mem / (16<<20);
 	if (max_write_buffer_number < 16) max_write_buffer_number = 16;
-	rocksdb_options_set_max_write_buffer_number(rdbopts, max_write_buffer_number);
+	rocksdb_options_set_max_write_buffer_number(rdbopts, (int) max_write_buffer_number);
 	/* background-flush the buffers to disk in batches of at least 1/3 the
-	   total number in memory, with a 1MB compression block size */
+	   total number in memory, with a 1MB compression block size.
+	   implicitly this assumes/hopes that merging, compressing and writing
+	   the data occurs at a rate not more than 2x slower than BAM parsing
+	   and ingest into RocksDB */
 	rocksdb_options_set_min_write_buffer_number_to_merge(rdbopts, max_write_buffer_number / 3);
+	bytes_per_file = (16<<20) * max_write_buffer_number / 3; /* used later */
 	rocksdb_options_set_block_size(rdbopts, 1<<20);
 
 	/* TUNE ON-DISK COMPACTION  */
@@ -432,12 +438,22 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	   tradeoff given that we're ultimately just going to do one sequential
 	   scan over the DB and then delete it. */
 	rocksdb_options_set_compaction_style(rdbopts, rocksdb_universal_compaction);
-	/* background merge each group of 16 files. this uses background cpu and
-	   disk bandwidth to reduce the merging work that has to be done in the
-	   unparallelized critical path of writing out the final BAM file */
-	rocksdb_options_set_level0_file_num_compaction_trigger(rdbopts, 16);
-	rocksdb_universal_compaction_options_set_min_merge_width(rdbucopts, 16);
-	rocksdb_universal_compaction_options_set_max_merge_width(rdbucopts, 16);
+
+	/* configure universal compaction to merge batches of disk files, using
+	   background cpu and disk bandwidth to reduce the merging work that has
+	   to be done in the unparallelized critical path of writing out the
+	   final BAM file */
+	if (data_size_hint >= 4*bytes_per_file) {
+		/* if we've been hinted the total uncompressed BAM data size, aim for
+		   ~1 round of intermediate compaction */
+		files_per_compaction = ((unsigned int)sqrt((float)data_size_hint/bytes_per_file)) + 1;
+	} else {
+		/* otherwise, use a default & hope for the best */
+		files_per_compaction = 16;
+	}
+	rocksdb_options_set_level0_file_num_compaction_trigger(rdbopts, files_per_compaction);
+	rocksdb_universal_compaction_options_set_min_merge_width(rdbucopts, files_per_compaction);
+	rocksdb_universal_compaction_options_set_max_merge_width(rdbucopts, files_per_compaction);
 	rocksdb_universal_compaction_options_set_max_size_amplification_percent(rdbucopts, 1<<30);
 	rocksdb_options_set_universal_compaction_options(rdbopts, rdbucopts);
 
@@ -503,23 +519,24 @@ cleanup:
 	return ret;
 }
 
-int bam_rocksort_core(int is_by_qname, const char *fn, const char *prefix, size_t max_mem_per_thread)
+int bam_rocksort_core(int is_by_qname, const char *fn, const char *prefix, size_t max_mem_per_thread, size_t data_size_hint)
 {
 	int ret;
 	char *fnout = calloc(strlen(prefix) + 4 + 1, 1);
 	sprintf(fnout, "%s.bam", prefix);
-	ret = bam_rocksort_core_ext(is_by_qname, fn, prefix, fnout, max_mem_per_thread, 0, -1, 0);
+	ret = bam_rocksort_core_ext(is_by_qname, fn, prefix, fnout, max_mem_per_thread, data_size_hint, 0, -1, 0);
 	free(fnout);
 	return ret;
 }
 
 int bam_rocksort(int argc, char *argv[])
 {
-	size_t max_mem = 768<<20; // 512MB
+	size_t max_mem = 768<<20; // 768MB
+	size_t size_hint = 0;
 	int c, is_by_qname = 0, is_stdout = 0, ret = 0,
 	    n_threads = 0, level = -1, full_path = 0, keep_db = 0;
 	char *fnout;
-	while ((c = getopt(argc, argv, "fnokm:@:l:")) >= 0) {
+	while ((c = getopt(argc, argv, "fnoks:m:@:l:")) >= 0) {
 		switch (c) {
 		case 'f': full_path = 1; break;
 		case 'o': is_stdout = 1; break;
@@ -531,6 +548,14 @@ int bam_rocksort(int argc, char *argv[])
 				if (*q == 'k' || *q == 'K') max_mem <<= 10;
 				else if (*q == 'm' || *q == 'M') max_mem <<= 20;
 				else if (*q == 'g' || *q == 'G') max_mem <<= 30;
+				break;
+			}
+		case 's': {
+				char *q2;
+				size_hint = strtol(optarg, &q2, 0);
+				if (*q2 == 'k' || *q2 == 'K') size_hint <<= 10;
+				else if (*q2 == 'm' || *q2 == 'M') size_hint <<= 20;
+				else if (*q2 == 'g' || *q2 == 'G') size_hint <<= 30;
 				break;
 			}
 		case '@': n_threads = atoi(optarg); break;
@@ -547,6 +572,7 @@ int bam_rocksort(int argc, char *argv[])
 		fprintf(stderr, "         -l INT    compression level, from 0 to 9 [-1]\n");
 		fprintf(stderr, "         -@ INT    number of sorting and compression threads [1]\n");
 		fprintf(stderr, "         -m INT    max memory per thread; suffix K/M/G recognized [768M]\n");
+		fprintf(stderr, "         -s INT    hint as to total uncompressed BAM data size; suffix K/M/G recognized\n");
 		fprintf(stderr, "\n");
 		return 1;
 	}
@@ -557,7 +583,7 @@ int bam_rocksort(int argc, char *argv[])
 		sprintf(fnout, "%s%s", argv[optind+1], full_path? "" : ".bam");
 	}
 
-	if (bam_rocksort_core_ext(is_by_qname, argv[optind], argv[optind+1], fnout, max_mem, n_threads, level, keep_db) < 0) ret = 1;
+	if (bam_rocksort_core_ext(is_by_qname, argv[optind], argv[optind+1], fnout, max_mem, size_hint, n_threads, level, keep_db) < 0) ret = 1;
 	free(fnout);
 	return ret;
 }
