@@ -87,7 +87,7 @@ lib:libbam.a
 libbam.a:$(LOBJS)
 	$(AR) -csru $@ $(LOBJS)
 
-samtools:rocksdb/Makefile rocksdb/librocksdb.a libbam.a $(HTSLIB) $(AOBJS)
+samtools:rocksdb/Makefile LIBROCKSDB_A libbam.a $(HTSLIB) $(AOBJS)
 	$(CC) -pthread $(LDFLAGS) -o $@ $(AOBJS) libbam.a $(HTSLIB) rocksdb/librocksdb.a $(LDLIBS) $(LIBCURSES) -lstdc++ -ljemalloc -lm -lz -lrt -lsnappy -lbz2
 
 rocksdb/Makefile:
@@ -98,8 +98,8 @@ git-submodule-incantations:
 	git submodule sync
 	git submodule update
 
-rocksdb/librocksdb.a:
-	$(MAKE) -C rocksdb
+LIBROCKSDB_A:
+	OPT=-DNDEBUG $(MAKE) -C rocksdb
 
 bgzip: bgzip.o $(HTSLIB)
 	$(CC) -pthread $(LDFLAGS) -o $@ bgzip.o $(HTSLIB) -lz
@@ -218,4 +218,4 @@ tags:
 force:
 
 
-.PHONY: all check clean distclean force install lib mostlyclean tags test git-submodule-incantations
+.PHONY: all check clean distclean force install lib mostlyclean tags test git-submodule-incantations LIBROCKSDB_A
