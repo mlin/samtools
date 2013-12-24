@@ -420,11 +420,13 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	   loading */
 	rocksdb_options_set_memtable_vector_rep(rdbopts);
 
-	/* flush memtables to disk in batches of max_mem_per_thread bytes,
-	   using up to n_threads, compressing in 2MB blocks */
-	bytes_per_file = (unsigned int) max_mem_per_thread;
-	rocksdb_options_set_write_buffer_size(rdbopts, bytes_per_file);
-	rocksdb_options_set_max_write_buffer_number(rdbopts, (int) n_threads);
+	/* flush memtables to disk in batches of max_mem/3 bytes, buffering up
+	   to 3 in memory, compressing in 2MB blocks. implicitly this hopes
+	   that RocksDB takes no more than 2x as long to sort, compress and
+	   write each buffer as it does for us to read, parse and insert it. */
+	bytes_per_file = (unsigned int) (max_mem / 3);
+	rocksdb_options_set_write_buffer_size(rdbopts, (size_t) bytes_per_file);
+	rocksdb_options_set_max_write_buffer_number(rdbopts, 3);
 	rocksdb_options_set_block_size(rdbopts, 2<<20);
 
 	/* TUNE ON-DISK COMPACTION  */
@@ -439,7 +441,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	   background cpu and disk bandwidth to reduce the merging work that has
 	   to be done in the unparallelized critical path of writing out the
 	   final BAM file */
-	if (data_size_hint >= 4*bytes_per_file) {
+	if (data_size_hint >= max_mem) {
 		/* if we've been hinted the total uncompressed BAM data size, aim for
 		   ~1 round of intermediate compaction */
 		files_per_compaction = ((unsigned int)sqrt((float)data_size_hint/bytes_per_file)) + 1;
@@ -450,15 +452,17 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	rocksdb_options_set_level0_file_num_compaction_trigger(rdbopts, 2*files_per_compaction);
 	rocksdb_universal_compaction_options_set_min_merge_width(rdbucopts, files_per_compaction);
 	rocksdb_universal_compaction_options_set_max_merge_width(rdbucopts, files_per_compaction);
+	rocksdb_universal_compaction_options_set_stop_style(rdbucopts, rocksdb_similar_size_compaction_stop_style);
+	rocksdb_universal_compaction_options_set_size_ratio(rdbucopts, 50);
+	/* disable compaction for size amplification - useless since we won't be
+	   overwriting or deleting anything */
 	rocksdb_universal_compaction_options_set_max_size_amplification_percent(rdbucopts, 1<<30);
-	rocksdb_universal_compaction_options_set_size_ratio(rdbucopts, 5);
 	rocksdb_options_set_universal_compaction_options(rdbopts, rdbucopts);
 
-	/* useless:
+	/* junk:
 	rocksdb_options_set_min_write_buffer_number_to_merge(rdbopts, max_write_buffer_number / 3);
 	rocksdb_options_set_target_file_size_base(rdbopts, 4*16777216);
 	rocksdb_options_set_source_compaction_factor(rdbopts, 10);
-	rocksdb_universal_compaction_options_set_stop_style(rdbucopts, rocksdb_similar_size_compaction_stop_style);
 	*/
 
 	rdbpath = choose_rocksdb_path(prefix);
