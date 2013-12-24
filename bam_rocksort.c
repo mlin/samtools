@@ -449,7 +449,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 		/* otherwise, use a default & hope for the best */
 		files_per_compaction = 16;
 	}
-	rocksdb_options_set_level0_file_num_compaction_trigger(rdbopts, 2*files_per_compaction);
+	rocksdb_options_set_level0_file_num_compaction_trigger(rdbopts, 2*files_per_compaction-1);
 	rocksdb_universal_compaction_options_set_min_merge_width(rdbucopts, files_per_compaction);
 	rocksdb_universal_compaction_options_set_max_merge_width(rdbucopts, files_per_compaction);
 	rocksdb_universal_compaction_options_set_stop_style(rdbucopts, rocksdb_similar_size_compaction_stop_style);
