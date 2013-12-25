@@ -99,7 +99,7 @@ git-submodule-incantations:
 	git submodule update
 
 LIBROCKSDB_A:
-	OPT=-DNDEBUG $(MAKE) -C rocksdb
+	OPT=-DNDEBUG $(MAKE) -C rocksdb librocksdb.a
 
 bgzip: bgzip.o $(HTSLIB)
 	$(CC) -pthread $(LDFLAGS) -o $@ bgzip.o $(HTSLIB) -lz
