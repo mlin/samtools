@@ -71,22 +71,22 @@ static int change_SO(bam_header_t *h, const char *so)
    we append to RocksDB key names to ensure uniqueness and sort stability */
 static int compare_sequence_numbers(const char *seqnoa, size_t alen, const char *seqnob, size_t blen) {
 	uint64_t ai = 0, bi = 0;
-	for(; alen; alen--) {
-		ai <<= 8;
-		ai |= (uint8_t) *(seqnoa++);
-	}
-	for(; blen; blen--) {
-		bi <<= 8;
-		bi |= (uint8_t) *(seqnob++);
-	}
-	if (ai < bi) {
-		return -1;
-	} else if (ai > bi) {
-		return 1;
-	} else {
-		/* shouldn't happen - the sequence numbers are unique... */
+	if (alen == blen) {
+		for(; alen; alen--) {
+			ai <<= 8; bi <<= 8;
+			ai |= (uint8_t) seqnoa[alen-1];
+			bi |= (uint8_t) seqnob[alen-1];
+		}
+		if (ai < bi) {
+			return -1;
+		} else if (ai > bi) {
+			return 1;
+		}
 		return 0;
+	} else if (alen < blen) {
+		return -1;
 	}
+	return 1;
 }
 
 /* RocksDB comparator for genome positions encoded as uint64_t's (as in
@@ -178,7 +178,7 @@ static int bam_to_rocksdb(bamFile fp, rocksdb_t *rdb, const int is_by_qname, uns
 			/* null-terminated qname followed by flags byte */
 			keylen = b->core.l_qname + sizeof(uint32_t);
 			if (keylen+sizeof(uint64_t) > keybufsz) {
-				keybufsz = keylen+sizeof(uint64_t);
+				keybufsz = keylen+sizeof(uint32_t);
 				kroundup32(keybufsz);
 				key = realloc(key, keybufsz);
 				if (!key) {
@@ -190,7 +190,7 @@ static int bam_to_rocksdb(bamFile fp, rocksdb_t *rdb, const int is_by_qname, uns
 			*(uint32_t*)(key+b->core.l_qname) = b->core.flag;
 		} else {
 			/* uint64_t encoded genome position (tid,pos,strand) */
-			*(uint64_t*)key = ((uint64_t)b->core.tid<<32|(b->core.pos+1)<<1|bam1_strand(b));
+			*(uint64_t*)key = (((uint64_t)b->core.tid)<<32|(b->core.pos+1)<<1|bam1_strand(b));
 			keylen = sizeof(uint64_t);
 		}
 		/* append the variable-length, little-endian sequence number to the key,
@@ -256,8 +256,8 @@ static int rocksdb_to_bam(rocksdb_t *rdb, const bam_header_t *header, const char
 	bam1_t *b;
 	size_t vsz = 0;
 	char mode[8];
-	const char *reopen_key = 0;
-	size_t reopen_key_len = 0;
+	const char *reopen_key = 0, *reopened_key = 0;
+	size_t reopen_key_len = 0, reopened_key_len = 0;
 
 	*count = 0;
 
@@ -304,6 +304,13 @@ static int rocksdb_to_bam(rocksdb_t *rdb, const bam_header_t *header, const char
 			}
 			rocksdb_iter_seek(rdbiter2, reopen_key, reopen_key_len);
 			if (!rocksdb_iter_valid(rdbiter2)) {
+				ret = -1;
+				break;
+			}
+			/* sanity check */
+			reopened_key = rocksdb_iter_key(rdbiter2, &reopened_key_len);
+			if (reopen_key_len != reopened_key_len || memcmp(reopen_key, reopened_key, reopen_key_len)) {
+				fprintf(stderr, "[bam_rocksort_core] BUG: RocksDB iterator reopened at different key!\n");
 				ret = -1;
 				break;
 			}
@@ -392,10 +399,6 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 
 	size_t max_mem = max_mem_per_thread * n_threads;
 	if (max_mem < 512*MB) max_mem = 512*MB;
-	/* Heuristic downward adjustment of max_mem to make memory requirements
-	   more similar to 'samtools sort' with the same parameters */
-	max_mem -= (size_t)((512*MB) * (max_mem <= (4*GB+512*MB) ? (max_mem+1-512*MB) / (4.0*GB) : 1.0));
-	max_mem_per_thread = max_mem / n_threads;
 
 	if (!(fp = strcmp(fn, "-")? bam_open(fn, "r") : bam_dopen(fileno(stdin), "r"))) {
 		fprintf(stderr, "[bam_rocksort_core] fail to open file %s\n", fn);
@@ -450,11 +453,14 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	   loading */
 	rocksdb_options_set_memtable_vector_rep(rdbopts);
 
-	/* flush memtables to disk in batches of max_mem/3 bytes, buffering up
-	   to 3 batches in memory. implicitly this hopes that RocksDB takes no
-	   more than 2x as long to sort, compress and write each buffer as it
-	   does for us to read, parse and insert it. */
-	bytes_per_file = max_mem / 3;
+	/* flush memtables to disk in batches of max_mem/4 bytes, buffering up
+	   to 3 batches in memory. we buffer only 3 even though each one is 1/4
+	   of allowed memory in order to stay under the memory limit when
+	   background compactions, which use some memory, are going on. with 3
+	   buffers we hope that RocksDB takes no more than 2X as long to sort,
+	   compress and write each buffer as it does for us to initially read,
+	   parse and insert it. */
+	bytes_per_file = max_mem / 4;
 	rocksdb_options_set_write_buffer_size(rdbopts, bytes_per_file);
 	rocksdb_options_set_max_write_buffer_number(rdbopts, 3);
 	/* compress in 2MB blocks */
@@ -476,6 +482,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 		/* data size hint not provided or unreasonably low; supply a default
 		   assumption of 32GB (roughly an 80X exome) */
 		data_size_hint = 32*GB;
+		fprintf(stderr, "[bam_rocksort_core] WARNING: assuming uncompressed data size of %llu bytes since hint was absent or unreasonably small; consider providing an accurate size hint (-s) to optimize sort performance\n", (unsigned long long) data_size_hint);
 	}
 	/* if there will be T total buffers, merge them in batches of sqrt(T) */
 	files_per_compaction = ((unsigned int)sqrt(((float)data_size_hint)/bytes_per_file)) + 1;
@@ -520,9 +527,9 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 
 	/* Provide feedback on data_size_hint */
 	if (((float)actual_data_size)/data_size_hint > 1.2) {
-		fprintf(stderr, "[bam_rocksort_core] WARNING: actual uncompressed data size (%llu bytes) was considerably greater than the hint or default assumption (%llu bytes); consider providing an accurate size hint (-s) to optimize sort performance\n", actual_data_size, (unsigned long long) data_size_hint);
+		fprintf(stderr, "[bam_rocksort_core] WARNING: actual uncompressed data size (%llu bytes) was well above than the hint or default assumption (%llu bytes); consider providing an accurate size hint (-s) to optimize sort performance\n", actual_data_size, (unsigned long long) data_size_hint);
 	} else if (((float)actual_data_size)/data_size_hint < 0.8) {
-		fprintf(stderr, "[bam_rocksort_core] WARNING: actual uncompressed data size (%llu bytes) was considerably less than the hint or default assumption (%llu bytes); consider providing an accurate size hint (-s) to optimize sort performance\n", actual_data_size, (unsigned long long) data_size_hint);
+		fprintf(stderr, "[bam_rocksort_core] WARNING: actual uncompressed data size (%llu bytes) was well below than the hint or default assumption (%llu bytes); consider providing an accurate size hint (-s) to optimize sort performance\n", actual_data_size, (unsigned long long) data_size_hint);
 	}  else {
 		fprintf(stderr, "[bam_rocksort_core] actual uncompressed data size (%llu bytes) was pretty close to the hint or default assumption (%llu bytes)\n", actual_data_size, (unsigned long long) data_size_hint);
 	}
@@ -533,6 +540,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 		goto cleanup;
 	}
 
+	/* sanity check */
 	if (count1 != count2) {
 		fprintf(stderr, "[bam_rocksort_core] BUG: read %llu, wrote %llu records!\n", count1, count2);
 		ret = -1;
