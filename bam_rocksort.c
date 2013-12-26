@@ -247,15 +247,17 @@ cleanup:
 }
 
 /* Traverse the RocksDB and output a BAM file */
-static int rocksdb_to_bam(rocksdb_t *rdb, const bam_header_t *header, const char *fnout, const int n_threads, const int level, unsigned long long *count) {
+static int rocksdb_to_bam(rocksdb_t *rdb, const bam_header_t *header, const char *fnout, const int n_threads, const int level, unsigned long reopen, unsigned long long *count) {
 	int ret = 0;
 	rocksdb_readoptions_t *rdbrdopts = 0;
-	rocksdb_iterator_t *rdbiter = 0;
+	rocksdb_iterator_t *rdbiter = 0, *rdbiter2 = 0;
 	char *rdberr = 0;
 	bamFile fp = 0;
 	bam1_t *b;
 	size_t vsz = 0;
 	char mode[8];
+	const char *reopen_key = 0;
+	size_t reopen_key_len = 0;
 
 	*count = 0;
 
@@ -280,7 +282,8 @@ static int rocksdb_to_bam(rocksdb_t *rdb, const bam_header_t *header, const char
 	if (n_threads > 1) bgzf_mt(fp, n_threads, 256);
 
 	/* For each record in RocksDB */
-	for (rocksdb_iter_seek_to_first(rdbiter); rocksdb_iter_valid(rdbiter); rocksdb_iter_next(rdbiter)) {
+	rocksdb_iter_seek_to_first(rdbiter);
+	while (rocksdb_iter_valid(rdbiter)) {
         /* Extract bam1_t, knowing that the RocksDB value consists of a bam1_t
 		   with a garbage data pointer, immediately followed by the data */
 		b = (bam1_t*) rocksdb_iter_value(rdbiter, &vsz);
@@ -289,6 +292,27 @@ static int rocksdb_to_bam(rocksdb_t *rdb, const bam_header_t *header, const char
 		/* Write to output BAM */
 		bam_write1(fp, b);
 		(*count)++;
+
+		/* if requested, periodically reopen the iterator at the current key,
+		   to start taking advantage of any background compactions that've
+		   finished in the meantime. */
+		if (reopen > 0 && (*count) % reopen == 0) {
+			reopen_key = rocksdb_iter_key(rdbiter, &reopen_key_len);
+			if (!(rdbiter2 = rocksdb_create_iterator(rdb, rdbrdopts))) {
+				ret = -4;
+				goto cleanup;
+			}
+			rocksdb_iter_seek(rdbiter2, reopen_key, reopen_key_len);
+			if (!rocksdb_iter_valid(rdbiter2)) {
+				ret = -1;
+				break;
+			}
+			rocksdb_iter_destroy(rdbiter);
+			rdbiter = rdbiter2;
+			rdbiter2 = 0;
+		}
+
+		rocksdb_iter_next(rdbiter);
 	}
 
 	rocksdb_iter_get_error(rdbiter, &rdberr);
@@ -301,6 +325,7 @@ static int rocksdb_to_bam(rocksdb_t *rdb, const bam_header_t *header, const char
 cleanup:
 	if (fp) bam_close(fp);
 	if (rdbiter) rocksdb_iter_destroy(rdbiter);
+	if (rdbiter2) rocksdb_iter_destroy(rdbiter2);
 	if (rdberr) free(rdberr);
 	if (rdbrdopts) rocksdb_readoptions_destroy(rdbrdopts);
 
@@ -463,6 +488,11 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	   overwriting or deleting anything */
 	rocksdb_universal_compaction_options_set_max_size_amplification_percent(rdbucopts, 1<<30);
 	rocksdb_options_set_universal_compaction_options(rdbopts, rdbucopts);
+	/* caveat: disable all background compaction if user requested
+	   single-threaded operation. */
+	if (n_threads <= 1) {
+		rocksdb_options_set_disable_auto_compactions(rdbopts, 1);
+	}
 
 	/* junk:
 	rocksdb_options_set_min_write_buffer_number_to_merge(rdbopts, max_write_buffer_number / 3);
@@ -499,7 +529,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 
 	/* Export sorted BAM from RocksDB */
 	fprintf(stderr, "[bam_rocksort_core] Writing %llu records to %s...\n", count1, fnout);
-	if ((ret = rocksdb_to_bam(rdb, header, fnout, n_threads, level, &count2)) != 0) {
+	if ((ret = rocksdb_to_bam(rdb, header, fnout, n_threads, level, count1/10, &count2)) != 0) {
 		goto cleanup;
 	}
 
