@@ -529,7 +529,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 
 	/* Export sorted BAM from RocksDB */
 	fprintf(stderr, "[bam_rocksort_core] Writing %llu records to %s...\n", count1, fnout);
-	if ((ret = rocksdb_to_bam(rdb, header, fnout, n_threads, level, count1/10, &count2)) != 0) {
+	if ((ret = rocksdb_to_bam(rdb, header, fnout, n_threads, level, count1/4, &count2)) != 0) {
 		goto cleanup;
 	}
 
