@@ -69,7 +69,7 @@ static int change_SO(bam_header_t *h, const char *so)
 
 /* compare function for variable-length, little-endian sequence numbers
    we append to RocksDB key names to ensure uniqueness and sort stability */
-static int compare_sequence_numbers(const char *seqnoa, size_t alen, const char *seqnob, size_t blen) {
+static inline int compare_sequence_numbers(const char *seqnoa, size_t alen, const char *seqnob, size_t blen) {
 	uint64_t ai = 0, bi = 0;
 	if (alen == blen) {
 		for(; alen; alen--) {

@@ -97,7 +97,7 @@ rocksdb/Makefile:
 
 LIBROCKSDB_A:
 	git submodule update
-	OPT=-DNDEBUG $(MAKE) -C rocksdb librocksdb.a
+	OPT=-DNDEBUG $(MAKE) -C rocksdb librocksdb.a -j16
 
 bgzip: bgzip.o $(HTSLIB)
 	$(CC) -pthread $(LDFLAGS) -o $@ bgzip.o $(HTSLIB) -lz
@@ -126,6 +126,7 @@ bam_reheader.o: bam_reheader.c $(htslib_bgzf_h) $(bam_h)
 bam_rmdup.o: bam_rmdup.c $(sam_h) $(HTSDIR)/htslib/khash.h
 bam_rmdupse.o: bam_rmdupse.c $(sam_h) $(HTSDIR)/htslib/khash.h $(HTSDIR)/htslib/klist.h
 bam_sort.o: bam_sort.c $(bam_h) $(HTSDIR)/htslib/ksort.h
+bam_rocksort.o: bam_rocksort.c $(bam_h)
 bam_stat.o: bam_stat.c $(bam_h)
 bam_tview.o: bam_tview.c $(bam_tview_h)
 bam_tview_curses.o: bam_tview_curses.c $(bam_tview_h)
