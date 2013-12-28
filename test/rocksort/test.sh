@@ -21,6 +21,14 @@ if [ -z "$TEST_BAM" ]; then
 	fi
 fi
 
+function sam_unique_lines {
+	echo $($samtools view $1 | sort | uniq | wc -l)
+}
+
+# count alignments
+expected_sam_count=$(sam_unique_lines $TEST_BAM)
+echo "SAM unique lines: $expected_sam_count"
+
 # Shuffle it
 testdir=$(mktemp -d --tmpdir samtools_rocksort_test.XXXXXX)
 echo "Temporary test directory: $testdir"
@@ -46,6 +54,11 @@ time $samtools rocksort -l 1 -@ 2 -m 16M "$shuffled_bam" "${testdir}/samtools_ro
 sorted_bam="${testdir}/samtools_rocksort_test_sorted.bam"
 
 echo -n "Verifying product: "
+result_sam_count=$(sam_unique_lines "$sorted_bam")
+if [ "$result_sam_count" != "$expected_sam_count" ]; then
+	echo "Mismatch of SAM unique lines: expected $expected_sam_count, got $result_sam_count"
+	exit 1
+fi
 ./bamsorted "$sorted_bam"
 
 # Clean up
