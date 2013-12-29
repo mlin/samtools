@@ -379,7 +379,7 @@ char* choose_rocksdb_path(const char *prefix) {
   and then merge them by calling bam_merge_core(). This function is
   NOT thread safe.
  */
-int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, size_t max_mem_per_thread, size_t data_size_hint, const int n_threads, const int level, const int keep_db) {
+int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, size_t max_mem_per_thread, size_t data_size_hint, int n_threads, const int level, const int keep_db) {
 	int ret = 0;
 	bamFile fp = 0;
 	bam_header_t *header = 0;
@@ -396,8 +396,10 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	unsigned int files_per_compaction = 0;
 	const size_t MB = ((size_t)1)<<20;
 	const size_t GB = ((size_t)1)<<30;
+	size_t max_mem;
 
-	size_t max_mem = max_mem_per_thread * n_threads;
+	if (n_threads < 1) n_threads=1;
+	max_mem = max_mem_per_thread * n_threads;
 	if (max_mem < 512*MB) max_mem = 512*MB;
 
 	if (!(fp = strcmp(fn, "-")? bam_open(fn, "r") : bam_dopen(fileno(stdin), "r"))) {
@@ -437,9 +439,12 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	rocksdb_options_set_cache(rdbopts, rdbcache);
 	rocksdb_options_set_max_open_files(rdbopts, 256);
 	/* concurrency */
-	rocksdb_options_set_max_background_compactions(rdbopts, n_threads);
 	rocksdb_env_set_background_threads(rdbenv, n_threads);
 	rocksdb_options_set_env(rdbopts, rdbenv);
+	rocksdb_options_set_max_background_compactions(rdbopts, n_threads);
+	if (n_threads == 1) {
+		rocksdb_options_set_disable_auto_compactions(rdbopts, 1);
+	}
 	/* turn off some durability and throttling features (unnecessary here) */
 	rocksdb_options_set_disable_data_sync(rdbopts, 1);
 	rocksdb_options_set_paranoid_checks(rdbopts, 0);
@@ -495,11 +500,6 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 	   overwriting or deleting anything */
 	rocksdb_universal_compaction_options_set_max_size_amplification_percent(rdbucopts, 1<<30);
 	rocksdb_options_set_universal_compaction_options(rdbopts, rdbucopts);
-	/* caveat: disable all background compaction if user requested
-	   single-threaded operation. */
-	if (n_threads <= 1) {
-		rocksdb_options_set_disable_auto_compactions(rdbopts, 1);
-	}
 
 	/* junk:
 	rocksdb_options_set_min_write_buffer_number_to_merge(rdbopts, max_write_buffer_number / 3);
