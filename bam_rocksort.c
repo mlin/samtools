@@ -9,6 +9,12 @@
 #include "bam.h"
 #include <rocksdb/c.h>
 
+#define SORT_KEY_SHUFFLE -1
+#define SORT_KEY_POS 0
+#define SORT_KEY_QNAME 1
+
+unsigned int shuffling_seed;
+
 static int strnum_cmp(const char *_a, const char *_b)
 {
 	const unsigned char *a = (const unsigned char*)_a, *b = (const unsigned char*)_b;
@@ -138,8 +144,8 @@ static void nop_rocksdb_comparator_destructor(void *c) {
 }
 
 /* Load contents of BAM fp into RocksDB rdb, keyed by leftmost genome position
-   (encoded as a uint64_t) or by qname (if is_by_qname) */
-static int bam_to_rocksdb(bamFile fp, rocksdb_t *rdb, const int is_by_qname, unsigned long long *count, unsigned long long *actual_data_size) {
+   (encoded as a uint64_t) or by qname (if sort_key==SORT_KEY_QNAME) */
+static int bam_to_rocksdb(bamFile fp, rocksdb_t *rdb, const int sort_key, unsigned long long *count, unsigned long long *actual_data_size) {
 	int ret = 0;
 	bam1_t *b = 0;
 	size_t buflen = 1024;
@@ -174,24 +180,50 @@ static int bam_to_rocksdb(bamFile fp, rocksdb_t *rdb, const int is_by_qname, uns
 	/* for each BAM record */
 	while ((ret = bam_read1(fp,b)) >= 0) {
 		/* formulate key for insertion into RocksDB */
-		if (is_by_qname) {
-			/* null-terminated qname followed by flags byte */
-			keylen = b->core.l_qname + sizeof(uint32_t);
-			if (keylen+sizeof(uint64_t) > keybufsz) {
-				keybufsz = keylen+sizeof(uint32_t);
-				kroundup32(keybufsz);
-				key = realloc(key, keybufsz);
-				if (!key) {
-					ret = -4;
-					goto cleanup;
+		switch (sort_key) {
+			case SORT_KEY_POS:
+				*(uint64_t*)key = (((uint64_t)b->core.tid)<<32|(b->core.pos+1)<<1|bam1_strand(b));
+				keylen = sizeof(uint64_t);
+				break;
+			case SORT_KEY_QNAME:
+				/* null-terminated qname followed by flags byte */
+				keylen = b->core.l_qname + sizeof(uint32_t);
+				if (keylen+sizeof(uint64_t) > keybufsz) {
+					keybufsz = keylen+sizeof(uint32_t);
+					kroundup32(keybufsz);
+					key = realloc(key, keybufsz);
+					if (!key) {
+						ret = -4;
+						goto cleanup;
+					}
 				}
-			}
-			memcpy(key, bam1_qname(b), b->core.l_qname);
-			*(uint32_t*)(key+b->core.l_qname) = b->core.flag;
-		} else {
-			/* uint64_t encoded genome position (tid,pos,strand) */
-			*(uint64_t*)key = (((uint64_t)b->core.tid)<<32|(b->core.pos+1)<<1|bam1_strand(b));
-			keylen = sizeof(uint64_t);
+				memcpy(key, bam1_qname(b), b->core.l_qname);
+				*(uint32_t*)(key+b->core.l_qname) = b->core.flag;
+				break;
+			case SORT_KEY_SHUFFLE:
+				*(uint64_t*)key = (uint64_t)
+				  (((uint64_t) rand_r(&shuffling_seed) <<  0) & 0x000000000000FFFFull) | 
+				  (((uint64_t) rand_r(&shuffling_seed) << 16) & 0x00000000FFFF0000ull) | 
+				  (((uint64_t) rand_r(&shuffling_seed) << 32) & 0x0000FFFF00000000ull) |
+				  (((uint64_t) rand_r(&shuffling_seed) << 48) & 0xFFFF000000000000ull);
+				keylen = sizeof(uint64_t);
+				/*
+				http://stackoverflow.com/a/7920941
+				NB: on any reasonably large BAM file there *will* be collisions
+				among the random keys, since RAND_MAX is only 2^31. Even if
+				RAND_MAX were 2^63, there would still be a substantial chance of
+				collisions on deep WGS BAMs (cf. birthday problem).
+				Records with colliding keys will appear in the same relative
+				order as in the input. We assume this will not be a serious
+				artifact because the records in these equivalence groups will be
+				drawn uniformly from throughout the input.
+				It would be nice to generate random uint64_t's from /dev/urandom
+				or a better generator, but this may not be worthwhile since it
+				introduces portability/dependency issues.
+				Another idea: xor with a 64-bit hash of the qname
+				*/
+				break;
+			default: assert(0);
 		}
 		/* append the variable-length, little-endian sequence number to the key,
 		   ensuring uniqueness & sort stability */
@@ -368,7 +400,7 @@ char* choose_rocksdb_path(const char *prefix) {
   @abstract Sort an unsorted BAM file based on the chromosome order
   and the leftmost position of an alignment
 
-  @param  is_by_qname whether to sort by query name
+  @param  sort_key one of SORT_KEY_POS, SORT_KEY_QNAME, or SORT_KEY_SHUFFLE
   @param  fn       name of the file to be sorted
   @param  prefix   prefix of the temporary files (prefix.NNNN.bam are written)
   @param  fnout    name of the final output file to be written
@@ -379,7 +411,7 @@ char* choose_rocksdb_path(const char *prefix) {
   and then merge them by calling bam_merge_core(). This function is
   NOT thread safe.
  */
-int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, const char *fnout, size_t max_mem_per_thread, size_t data_size_hint, int n_threads, const int level, const int keep_db) {
+int bam_rocksort_core_ext(const int sort_key, const char *fn, const char *prefix, const char *fnout, size_t max_mem_per_thread, size_t data_size_hint, int n_threads, const int level, const int keep_db) {
 	int ret = 0;
 	bamFile fp = 0;
 	bam_header_t *header = 0;
@@ -412,13 +444,25 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 		ret = -1;
 		goto cleanup;
 	}
-	if (is_by_qname) change_SO(header, "queryname");
-	else change_SO(header, "coordinate");
+	switch (sort_key) {
+		case SORT_KEY_POS:
+			change_SO(header, "coordinate");
+			break;
+		case SORT_KEY_QNAME:
+			change_SO(header, "queryname");
+			break;
+		case SORT_KEY_SHUFFLE:
+			change_SO(header, "unsorted");
+			break;
+		default:
+			assert(0);
+	}
 
 	/* Configure & open RocksDB */
-	if (is_by_qname) {
+	if (sort_key == SORT_KEY_QNAME) {
 		rdbcomp = rocksdb_comparator_create(0, nop_rocksdb_comparator_destructor, qname_rocksdb_comparator, qname_rocksdb_comparator_name);
 	} else {
+		/* the position comparator is used for both SORT_KEY_POS and SORT_KEY_SHUFFLE */
 		rdbcomp = rocksdb_comparator_create(0, nop_rocksdb_comparator_destructor, pos_rocksdb_comparator, pos_rocksdb_comparator_name);
 	}
 	rdbenv = rocksdb_create_default_env();
@@ -521,7 +565,7 @@ int bam_rocksort_core_ext(int is_by_qname, const char *fn, const char *prefix, c
 
 	/* Load input BAM into RocksDB */ 
 	fprintf(stderr, "[bam_rocksort_core] Sorting in %s/ (you can change this with the TMPDIR environment variable)...\n", rdbpath);
-	if ((ret = bam_to_rocksdb(fp, rdb, is_by_qname, &count1, &actual_data_size)) != 0) {
+	if ((ret = bam_to_rocksdb(fp, rdb, sort_key, &count1, &actual_data_size)) != 0) {
 		goto cleanup;
 	}
 
@@ -570,12 +614,12 @@ cleanup:
 	return ret;
 }
 
-int bam_rocksort_core(int is_by_qname, const char *fn, const char *prefix, size_t max_mem_per_thread, size_t data_size_hint)
+int bam_rocksort_core(int sort_key, const char *fn, const char *prefix, size_t max_mem_per_thread, size_t data_size_hint)
 {
 	int ret;
 	char *fnout = calloc(strlen(prefix) + 4 + 1, 1);
 	sprintf(fnout, "%s.bam", prefix);
-	ret = bam_rocksort_core_ext(is_by_qname, fn, prefix, fnout, max_mem_per_thread, data_size_hint, 0, -1, 0);
+	ret = bam_rocksort_core_ext(sort_key, fn, prefix, fnout, max_mem_per_thread, data_size_hint, 0, -1, 0);
 	free(fnout);
 	return ret;
 }
@@ -584,14 +628,15 @@ int bam_rocksort(int argc, char *argv[])
 {
 	size_t max_mem = 768<<20; // 768MB
 	size_t size_hint = 0;
-	int c, is_by_qname = 0, is_stdout = 0, ret = 0,
+	int c, sort_key = SORT_KEY_POS, is_stdout = 0, ret = 0,
 	    n_threads = 0, level = -1, full_path = 0, keep_db = 0;
 	char *fnout;
-	while ((c = getopt(argc, argv, "fnoks:m:@:l:")) >= 0) {
+	shuffling_seed = 0;
+	while ((c = getopt(argc, argv, "fnoks:m:@:l:u:")) >= 0) {
 		switch (c) {
 		case 'f': full_path = 1; break;
 		case 'o': is_stdout = 1; break;
-		case 'n': is_by_qname = 1; break;
+		case 'n': sort_key = SORT_KEY_QNAME; break;
 		case 'k': keep_db=1; break;
 		case 'm': {
 				char *q;
@@ -611,6 +656,10 @@ int bam_rocksort(int argc, char *argv[])
 			}
 		case '@': n_threads = atoi(optarg); break;
 		case 'l': level = atoi(optarg); break;
+		case 'u':
+			shuffling_seed = (unsigned int) atoi(optarg);
+			sort_key = SORT_KEY_SHUFFLE;
+			break;
 		}
 	}
 	if (optind + 2 > argc) {
@@ -624,6 +673,7 @@ int bam_rocksort(int argc, char *argv[])
 		fprintf(stderr, "         -@ INT    number of sorting and compression threads [1]\n");
 		fprintf(stderr, "         -m INT    max memory per thread; suffix K/M/G recognized [768M]\n");
 		fprintf(stderr, "         -s INT    hint as to total uncompressed BAM data size; suffix K/M/G recognized\n");
+		fprintf(stderr, "         -u INT    unsort: randomly shuffle the BAM, using given integer as random seed\n");
 		fprintf(stderr, "\n");
 		return 1;
 	}
@@ -634,7 +684,7 @@ int bam_rocksort(int argc, char *argv[])
 		sprintf(fnout, "%s%s", argv[optind+1], full_path? "" : ".bam");
 	}
 
-	if (bam_rocksort_core_ext(is_by_qname, argv[optind], argv[optind+1], fnout, max_mem, size_hint, n_threads, level, keep_db) < 0) ret = 1;
+	if (bam_rocksort_core_ext(sort_key, argv[optind], argv[optind+1], fnout, max_mem, size_hint, n_threads, level, keep_db) < 0) ret = 1;
 	free(fnout);
 	return ret;
 }
