@@ -1,0 +1,51 @@
+# Ansible playbook for preparing an EC2 instance to run samtools rocksort benchmarks.
+# Current assumptions:
+# - Ubuntu 12.04 LTS
+# - Scratch RAID0 array /dev/md0 mounted at /mnt
+# - Desired git revisions of htslib and samtools have been cloned and built under /root
+# To bootstrap (as root):
+# add-apt-repository ppa:rquillo/ansible -y && apt-get update && apt-get install ansible -y && ansible-playbook -i localhost, /root/samtools/test/rocksort/benchmark/prepare.yml
+---
+- hosts: localhost
+  connection: local
+  tasks:
+  - name: apt
+    apt_repository: repo='ppa:ubuntu-toolchain-r/test'
+  - apt: update_cache=yes upgrade=full
+  - apt: pkg={{item}}
+    with_items:
+    - htop
+    - dstat
+    - libsnappy-dev
+    - libjemalloc-dev
+    - libncurses5-dev
+    - aria2
+    - zlib1g-dev
+    - libbz2-dev
+    - gcc-4.8
+    - g++-4.8
+    - pigz
+    - mutt
+  - name: libgflags
+    get_url: dest=/root/libgflags.deb url=https://gflags.googlecode.com/files/libgflags0_2.0-1_amd64.deb
+  - get_url: dest=/root/libgflags-dev.deb url=https://gflags.googlecode.com/files/libgflags-dev_2.0-1_amd64.deb
+  - command: "dpkg --skip-same-version -i /root/{{item}}.deb"
+    with_items:
+    - libgflags
+    - libgflags-dev
+  - name: make gcc 4.8 the default
+    command: update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-4.8 50
+  - command: update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 50
+
+  - name: scratch space optimization
+    command: blockdev --setra 512 /dev/md0
+  - copy: src=prewarm.sh dest=/root/prewarm.sh owner=root group=root mode=0700
+  - command: /root/prewarm.sh creates=/mnt/.PREWARMED
+
+  - name: retrieve testing BAMs
+    command: aria2c -x 5 --lowest-speed-limit=1M https://s3.amazonaws.com/1000genomes/data/HG02345/exome_alignment/HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam chdir=/mnt creates=/mnt/HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam
+  - command: aria2c -x 5 --lowest-speed-limit=1M https://s3.amazonaws.com/1000genomes/data/HG02345/alignment/HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam chdir=/mnt creates=/mnt/HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam
+
+  - name: shuffle testing BAMs
+    command: /root/samtools/samtools bamshuf HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam wes chdir=/mnt creates=/mnt/wes.bam
+  - command: /root/samtools/samtools bamshuf HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam wgs_lo chdir=/mnt creates=/mnt/wgs_lo.bam
