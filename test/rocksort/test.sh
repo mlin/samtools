@@ -35,7 +35,7 @@ echo "Temporary test directory: $testdir"
 cd "$testdir"
 shuffled_bam="${testdir}/samtools_rocksort_test_shuffled.bam"
 echo "Shuffling $TEST_BAM..."
-$samtools bamshuf $TEST_BAM "${testdir}/samtools_rocksort_test_shuffled"
+$samtools rocksort -u 0 -l 1 $TEST_BAM "${testdir}/samtools_rocksort_test_shuffled"
 
 # Compile and test bamsorted.c (FIXME ugly)
 cc -o bamsorted -O2 ${srcdir}/bamsorted.c -I"$htslibdir" -I"$samtoolsdir" "$htslibdir/libhts.a" "$samtoolsdir/libbam.a" "$htslibdir/faidx.o" -lz -lpthread
