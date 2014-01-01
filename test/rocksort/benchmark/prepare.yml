@@ -43,9 +43,29 @@
   - command: /root/prewarm.sh creates=/mnt/.PREWARMED
 
   - name: retrieve testing BAMs
-    command: aria2c -x 5 --lowest-speed-limit=1M https://s3.amazonaws.com/1000genomes/data/HG02345/exome_alignment/HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam chdir=/mnt creates=/mnt/HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam
-  - command: aria2c -x 5 --lowest-speed-limit=1M https://s3.amazonaws.com/1000genomes/data/HG02345/alignment/HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam chdir=/mnt creates=/mnt/HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam
+    command: aria2c -x 5 --lowest-speed-limit=1M {{ item.url }} chdir=/mnt creates=/mnt/{{name}}
+    with_items:
+    - { url: 'https://s3.amazonaws.com/1000genomes/data/HG02345/exome_alignment/HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam'
+      , name: 'HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam' }
+    - { url: 'https://s3.amazonaws.com/1000genomes/data/HG02345/alignment/HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam'
+      , name: 'HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam' }
+    - { url: 'https://s3.amazonaws.com/1000genomes/data/HG02348/alignment/HG02348.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam'
+      , name: 'HG02348.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam' }
+    - { url: 'https://s3.amazonaws.com/1000genomes/data/HG02351/alignment/HG02351.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam'
+      , name: 'HG02351.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam' }
+    - { url: 'https://s3.amazonaws.com/1000genomes/data/HG02353/alignment/HG02353.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam'
+      , name: 'HG02353.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam' }
+    - { url: 'https://s3.amazonaws.com/1000genomes/data/HG02355/alignment/HG02355.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam'
+      , name: 'HG02355.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam' }
+    - { url: 'https://s3.amazonaws.com/1000genomes/data/HG02356/alignment/HG02356.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam'
+      , name: 'HG02356.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam' }
+    - { url: 'https://s3.amazonaws.com/1000genomes/data/HG02360/alignment/HG02360.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam'
+      , name: 'HG02360.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam' }
 
   - name: shuffle testing BAMs
-    command: /root/samtools/samtools bamshuf HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam wes chdir=/mnt creates=/mnt/wes.bam
-  - command: /root/samtools/samtools bamshuf HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam wgs_lo chdir=/mnt creates=/mnt/wgs_lo.bam
+    shell: cat HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam | pigz -dc | /root/samtools/samtools rocksort -u 31415926 -@ 5 -m 1G -s 32G - wes chdir=/mnt creates=/mnt/wes.bam
+  - shell: cat HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam | pigz -dc | /root/samtools/samtools rocksort -u 31415926 -@ 5 -m 1G -s 64G - wgs_lo chdir=/mnt creates=/mnt/wgs_lo.bam
+
+  - name: create synthetic high-coverage WGS BAM by pooling several low-coverage BAMs
+    command: /root/samtools/samtools merge -@ 8 wgs_hi.sorted.bam HG02348.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam HG02351.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam HG02353.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam HG02355.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam HG02356.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam HG02360.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam chdir=/mnt creates=/mnt/wgs_hi.sorted.bam
+  - shell: cat wgs_hi.sorted.bam | pigz -dc | /root/samtools/samtools rocksort -u 31415926 -@ 5 -m 1G -s 500G - wgs_hi chdir=/mnt creates=/mnt/wgs_hi.bam
