@@ -41,7 +41,7 @@
     command: make chdir=/root/samtools
 
   - name: retrieve several BAMs from s3://1000genomes
-  - file: path=/mnt/input_raw state=directory
+    file: path=/mnt/input_raw state=directory
   - command: aria2c -x 10 -j 10 --lowest-speed-limit=1M {{ item.url }} chdir=/mnt/input_raw creates=/mnt/input_raw/{{ item.name }}
     with_items:
     - { url: 'https://s3.amazonaws.com/1000genomes/data/HG02345/exome_alignment/HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam'
