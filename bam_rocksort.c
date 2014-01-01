@@ -425,6 +425,7 @@ int bam_rocksort_core_ext(const int sort_key, const char *fn, const char *prefix
 	char *rdbpath = 0;
 	unsigned long long count1 = 0, count2 = 0, actual_data_size = 0;
 	size_t bytes_per_file = 0;
+	unsigned int max_background_compactions = 0, max_background_flushes = 0;
 	unsigned int files_per_compaction = 0;
 	const size_t MB = ((size_t)1)<<20;
 	const size_t GB = ((size_t)1)<<30;
@@ -482,19 +483,34 @@ int bam_rocksort_core_ext(const int sort_key, const char *fn, const char *prefix
 	rocksdb_options_set_compression(rdbopts, rocksdb_snappy_compression);
 	rocksdb_options_set_cache(rdbopts, rdbcache);
 	rocksdb_options_set_max_open_files(rdbopts, 256);
-	/* concurrency */
-	rocksdb_env_set_background_threads(rdbenv, n_threads);
-	rocksdb_options_set_env(rdbopts, rdbenv);
-	rocksdb_options_set_max_background_compactions(rdbopts, n_threads);
-	if (n_threads == 1) {
-		rocksdb_options_set_disable_auto_compactions(rdbopts, 1);
-	}
 	/* turn off some durability and throttling features (unnecessary here) */
 	rocksdb_options_set_disable_data_sync(rdbopts, 1);
 	rocksdb_options_set_paranoid_checks(rdbopts, 0);
 	rocksdb_options_set_disable_seek_compaction(rdbopts, 1);
 	rocksdb_options_set_level0_slowdown_writes_trigger(rdbopts, GB);
 	rocksdb_options_set_level0_stop_writes_trigger(rdbopts, GB);
+
+	/* CONCURRENCY */
+	/* up to two concurrent memtable flushes (see below) */
+	max_background_flushes = n_threads > 1 ? 2 : 1;
+	rocksdb_env_set_high_priority_background_threads(rdbenv, max_background_flushes);
+	rocksdb_options_set_max_background_flushes(rdbopts, max_background_flushes);
+	max_background_compactions = n_threads-1;
+	if (max_background_compactions > 3) {
+		/* set a ceiling on concurrent background compactions, since each one
+		   seems to use up substantial memory */
+		max_background_compactions = 3;
+	}
+	if (max_background_compactions > 0) {
+		rocksdb_env_set_background_threads(rdbenv, n_threads);
+		rocksdb_options_set_max_background_compactions(rdbopts, max_background_compactions);
+	} else {
+		rocksdb_options_set_disable_auto_compactions(rdbopts, 1);
+	}
+	rocksdb_options_set_env(rdbopts, rdbenv);
+	/* note: for n_threads <= 4, we may have provisioned n_threads+1
+	   background threads. in practice however, each is likely to spend a
+	   lot of time either idle or I/O-bound. */
 
 	/* TUNE IN-MEMORY SORTING & COMPRESSION */
 
@@ -507,8 +523,8 @@ int bam_rocksort_core_ext(const int sort_key, const char *fn, const char *prefix
 	   of allowed memory in order to stay under the memory limit when
 	   background compactions, which use some memory, are going on. with 3
 	   buffers we hope that RocksDB takes no more than 2X as long to sort,
-	   compress and write each buffer as it does for us to initially read,
-	   parse and insert it. */
+	   Snappy-compress and write each buffer as it does for us to initially
+	   read, parse and insert it. */
 	bytes_per_file = max_mem / 4;
 	rocksdb_options_set_write_buffer_size(rdbopts, bytes_per_file);
 	rocksdb_options_set_max_write_buffer_number(rdbopts, 3);
