@@ -371,6 +371,12 @@ static int rocksdb_to_bam(rocksdb_t *rdb, const bam_header_t *header, const char
 		goto cleanup;
 	}
 
+	if (fp->errcode) {
+		fprintf(stderr, "[bam_rocksort_core] error writing final BAM: %x\n", fp->errcode);
+		ret = -1;
+		goto cleanup;
+	}
+
 cleanup:
 	if (fp) bam_close(fp);
 	if (rdbiter) rocksdb_iter_destroy(rdbiter);
