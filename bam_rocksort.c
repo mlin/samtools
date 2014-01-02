@@ -670,6 +670,7 @@ int bam_rocksort(int argc, char *argv[])
 				if (*q == 'k' || *q == 'K') max_mem <<= 10;
 				else if (*q == 'm' || *q == 'M') max_mem <<= 20;
 				else if (*q == 'g' || *q == 'G') max_mem <<= 30;
+				else if (*q == 't' || *q == 'T') max_mem <<= 40;
 				break;
 			}
 		case 's': {
@@ -678,6 +679,7 @@ int bam_rocksort(int argc, char *argv[])
 				if (*q2 == 'k' || *q2 == 'K') size_hint <<= 10;
 				else if (*q2 == 'm' || *q2 == 'M') size_hint <<= 20;
 				else if (*q2 == 'g' || *q2 == 'G') size_hint <<= 30;
+				else if (*q2 == 't' || *q2 == 'T') size_hint <<= 40;
 				break;
 			}
 		case '@': n_threads = atoi(optarg); break;
