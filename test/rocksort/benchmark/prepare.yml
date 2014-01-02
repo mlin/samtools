@@ -66,7 +66,7 @@
   - name: shuffle testing BAMs
     file: path=/mnt/input state=directory
   - shell: cat HG02345.mapped.ILLUMINA.bwa.PEL.exome.20130415.bam | pigz -dc | /root/samtools/samtools rocksort -u 31415926 -@ 5 -m 1G -s 32G - /mnt/input/wes chdir=/mnt/input_raw creates=/mnt/input/wes.bam
-  - shell: cat HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam | pigz -dc | /root/samtools/samtools rocksort -u 31415926 -@ 5 -m 1G -s 64G - /mint/input/wgs_lo chdir=/mnt/input_raw creates=/mnt/input/wgs_lo.bam
+  - shell: cat HG02345.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam | pigz -dc | /root/samtools/samtools rocksort -u 31415926 -@ 5 -m 1G -s 64G - /mnt/input/wgs_lo chdir=/mnt/input_raw creates=/mnt/input/wgs_lo.bam
 
   - name: create synthetic high-coverage WGS BAM by pooling several low-coverage BAMs
     command: /root/samtools/samtools merge -@ 8 /mnt/input/wgs_hi.sorted.bam HG02348.mapped.ILLUMINA.bwa.PEL.low_coverage.20130415.bam HG02351.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam HG02353.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam HG02355.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam HG02356.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam HG02360.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam HG02363.mapped.ILLUMINA.bwa.CDX.low_coverage.20120522.bam chdir=/mnt/input_raw creates=/mnt/input/wgs_hi.sorted.bam
