@@ -563,7 +563,7 @@ int bam_rocksort_core_ext(const int sort_key, const char *fn, const char *prefix
 	files_per_compaction = ((unsigned int)sqrt(((float)data_size_hint)/bytes_per_file)) + 1;
 	rocksdb_options_set_level0_file_num_compaction_trigger(rdbopts, 2*files_per_compaction);
 	rocksdb_universal_compaction_options_set_min_merge_width(rdbucopts, files_per_compaction);
-	rocksdb_universal_compaction_options_set_max_merge_width(rdbucopts, files_per_compaction);
+	rocksdb_universal_compaction_options_set_max_merge_width(rdbucopts, 2*files_per_compaction);
 	rocksdb_universal_compaction_options_set_stop_style(rdbucopts, rocksdb_similar_size_compaction_stop_style);
 	rocksdb_universal_compaction_options_set_size_ratio(rdbucopts, 50);
 	/* disable compaction for size amplification - useless since we won't be
