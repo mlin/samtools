@@ -561,8 +561,8 @@ int bam_rocksort_core_ext(const int sort_key, const char *fn, const char *prefix
 	   final BAM file */
 	if (data_size_hint < 2*bytes_per_file) {
 		/* data size hint not provided or unreasonably low; supply a default
-		   assumption of 32GB (roughly an 80X exome) */
-		data_size_hint = 32*GB;
+		   assumption of 512GB (roughly a deep human WGS) */
+		data_size_hint = 512*GB;
 		fprintf(stderr, "[bam_rocksort_core] WARNING: assuming uncompressed data size of %llu bytes since hint was absent or unreasonably small; consider providing an accurate size hint (-s) to optimize sort performance\n", (unsigned long long) data_size_hint);
 	}
 	/* if there will be T total buffers, merge them in batches of sqrt(T) */
@@ -603,11 +603,11 @@ int bam_rocksort_core_ext(const int sort_key, const char *fn, const char *prefix
 
 	/* Provide feedback on data_size_hint */
 	if (((float)actual_data_size)/data_size_hint > 1.2) {
-		fprintf(stderr, "[bam_rocksort_core] WARNING: actual uncompressed data size (%llu bytes) was well above than the hint or default assumption (%llu bytes); consider providing an accurate size hint (-s) to optimize sort performance\n", actual_data_size, (unsigned long long) data_size_hint);
+		fprintf(stderr, "[bam_rocksort_core] WARNING: actual uncompressed data size (%llu bytes) was well above the assumption (%llu bytes); consider providing an accurate size hint (-s) to optimize sort performance\n", actual_data_size, (unsigned long long) data_size_hint);
 	} else if (((float)actual_data_size)/data_size_hint < 0.8) {
-		fprintf(stderr, "[bam_rocksort_core] WARNING: actual uncompressed data size (%llu bytes) was well below than the hint or default assumption (%llu bytes); consider providing an accurate size hint (-s) to optimize sort performance\n", actual_data_size, (unsigned long long) data_size_hint);
+		fprintf(stderr, "[bam_rocksort_core] WARNING: actual uncompressed data size (%llu bytes) was well below the assumption (%llu bytes); consider providing an accurate size hint (-s) to optimize sort performance\n", actual_data_size, (unsigned long long) data_size_hint);
 	}  else {
-		fprintf(stderr, "[bam_rocksort_core] actual uncompressed data size (%llu bytes) was pretty close to the hint or default assumption (%llu bytes)\n", actual_data_size, (unsigned long long) data_size_hint);
+		fprintf(stderr, "[bam_rocksort_core] actual uncompressed data size (%llu bytes) was pretty close to the assumption (%llu bytes)\n", actual_data_size, (unsigned long long) data_size_hint);
 	}
 
 	/* Export sorted BAM from RocksDB */
